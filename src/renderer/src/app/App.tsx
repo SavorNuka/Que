@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AppInfo, MediaKind, MediaSummary, ProviderStatus, Source } from '@shared/types';
+import type {
+  AppInfo,
+  MediaKind,
+  MediaSummary,
+  ProviderStatus,
+  ScanResult,
+  Source,
+} from '@shared/types';
+import { Player } from './Player';
 
 /**
  * M0 shell.
@@ -127,6 +135,9 @@ function Library(): React.JSX.Element {
   const [total, setTotal] = useState<number | null>(null);
   const [status, setStatus] = useState('');
   const [dragging, setDragging] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanLine, setScanLine] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<MediaSummary | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     if (query.trim()) {
@@ -144,6 +155,57 @@ function Library(): React.JSX.Element {
     const t = setTimeout(() => void refresh(), 60); // 60ms — queries run in ~3ms
     return () => clearTimeout(t);
   }, [refresh]);
+
+  // Scan progress arrives as events rather than polling, so a long scan
+  // reports where it is without the UI asking.
+  useEffect(() => {
+    const off = window.que.on('scan:progress', (p) => {
+      setScanLine(
+        p.done
+          ? null
+          : `${p.scanned} scanned · ${p.added} new${p.moved ? ` · ${p.moved} moved` : ''}`
+      );
+    });
+    return off;
+  }, []);
+
+  useEffect(() => {
+    const off = window.que.on('library:changed', () => void refresh());
+    return off;
+  }, [refresh]);
+
+  const scan = useCallback(
+    async (full: boolean): Promise<void> => {
+      setScanning(true);
+      setStatus('');
+      try {
+        const results: ScanResult[] = await window.que['library:scan'](null, full);
+        const totals = results.reduce(
+          (acc, r) => ({
+            added: acc.added + r.added,
+            moved: acc.moved + r.moved,
+            missing: acc.missing + r.missing,
+            failed: acc.failed + r.failed,
+            scanned: acc.scanned + r.scanned,
+          }),
+          { added: 0, moved: 0, missing: 0, failed: 0, scanned: 0 }
+        );
+        setStatus(
+          `Scanned ${totals.scanned}: ${totals.added} new` +
+            (totals.moved ? `, ${totals.moved} moved` : '') +
+            (totals.missing ? `, ${totals.missing} now missing` : '') +
+            (totals.failed ? `, ${totals.failed} failed` : '')
+        );
+      } catch (e) {
+        setStatus(e instanceof Error ? e.message : String(e));
+      } finally {
+        setScanning(false);
+        setScanLine(null);
+        await refresh();
+      }
+    },
+    [refresh]
+  );
 
   const importPaths = useCallback(
     async (paths: string[]): Promise<void> => {
@@ -179,6 +241,8 @@ function Library(): React.JSX.Element {
       onDragLeave={() => setDragging(false)}
       onDrop={onDrop}
     >
+      {playing && <Player item={playing} onClose={() => setPlaying(null)} />}
+
       <header>
         <h1>Que</h1>
         <input
@@ -195,10 +259,20 @@ function Library(): React.JSX.Element {
         <SourceRow kind="video" source={bySource.get('video')} onChange={reloadSources} />
         <SourceRow kind="audio" source={bySource.get('audio')} onChange={reloadSources} />
         <div className="actions">
+          <button onClick={() => void scan(false)} disabled={scanning}>
+            {scanning ? 'Scanning…' : 'Scan library'}
+          </button>
+          <button onClick={() => void scan(true)} disabled={scanning}>
+            Full rescan
+          </button>
+          {scanning && (
+            <button onClick={() => void window.que['library:cancelScan']()}>Cancel</button>
+          )}
           <button
             onClick={() =>
               void window.que['library:pickFiles']('video').then((p) => importPaths(p))
             }
+            disabled={scanning}
           >
             Add videos…
           </button>
@@ -206,12 +280,14 @@ function Library(): React.JSX.Element {
             onClick={() =>
               void window.que['library:pickFiles']('audio').then((p) => importPaths(p))
             }
+            disabled={scanning}
           >
             Add music…
           </button>
-          {status && <span className="status">{status}</span>}
+          {scanLine && <span className="status">{scanLine}</span>}
+          {status && !scanLine && <span className="status">{status}</span>}
         </div>
-        <p className="hint">…or drop files anywhere in this window.</p>
+        <p className="hint">…or drop files — or a whole folder — anywhere in this window.</p>
       </section>
 
       <section className="panel">
@@ -238,8 +314,16 @@ function Library(): React.JSX.Element {
             </thead>
             <tbody>
               {items.map((m) => (
-                <tr key={m.id}>
-                  <td>{m.title}</td>
+                <tr key={m.id} className={m.missing ? 'missing' : undefined}>
+                  <td>
+                    <button className="link" onClick={() => setPlaying(m)} disabled={m.missing}>
+                      {m.title}
+                    </button>
+                    {m.missing && <span className="badge">missing</span>}
+                    {m.resumeMs !== null && m.resumeMs > 0 && (
+                      <span className="badge resume">resume</span>
+                    )}
+                  </td>
                   <td className="dim">{m.kind}</td>
                   <td className="dim">{m.year ?? '—'}</td>
                   <td className="dim">{formatDuration(m.durationMs)}</td>

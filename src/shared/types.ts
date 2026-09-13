@@ -77,7 +77,10 @@ export interface MediaDetail extends MediaSummary {
   container: string | null;
   videoCodec: string | null;
   audioCodec: string | null;
+  width: number | null;
+  height: number | null;
   needsRemux: boolean;
+  remuxReason: 'container' | 'video-codec' | 'audio-codec' | null;
   overview: string | null;
   genres: string[];
   trailerYtId: string | null;
@@ -220,6 +223,29 @@ export interface Settings {
   /** Presence only — values never leave the main process. */
   hasTmdbKey: boolean;
   hasWyzieKey: boolean;
+}
+
+/** §7 — what a scan did. */
+export interface ScanResult {
+  kind: MediaKind;
+  scanned: number;
+  added: number;
+  updated: number;
+  moved: number;
+  missing: number;
+  unchanged: number;
+  failed: number;
+  errors: { path: string; message: string }[];
+  cancelled: boolean;
+  durationMs: number;
+}
+
+export interface ServerStatus {
+  running: boolean;
+  port: number;
+  host: string;
+  lanEnabled: boolean;
+  token: string | null;
 }
 
 export interface ProviderStatus {

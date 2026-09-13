@@ -143,8 +143,16 @@ export const argSchemas = {
     z.record(z.string().max(100), z.string().max(10000).nullable()),
   ]),
 
+  'library:scan': z.tuple([kind.nullable(), z.boolean()]),
+  'library:cancelScan': z.tuple([]),
   'library:setHidden': z.tuple([id, z.boolean()]),
   'library:setAgeRating': z.tuple([id, z.number().int().min(0).max(21).nullable()]),
+
+  'media:streamUrl': z.tuple([id]),
+  // Positions are clamped: a bad value should not poison resume.
+  'player:progress': z.tuple([id, z.number().int().min(0).max(86_400_000)]),
+  'player:finished': z.tuple([id]),
+  'server:status': z.tuple([]),
 
   'restrictions:get': z.tuple([]),
   'restrictions:set': z.tuple([restrictionPatchSchema]),

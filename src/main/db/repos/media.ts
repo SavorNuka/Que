@@ -23,7 +23,10 @@ interface MediaRow {
   container: string | null;
   video_codec: string | null;
   audio_codec: string | null;
+  width: number | null;
+  height: number | null;
   needs_remux: number;
+  remux_reason: MediaDetail['remuxReason'];
   title: string | null;
   sort_title: string | null;
   year: number | null;
@@ -325,7 +328,10 @@ export function get(db: Db, id: number): MediaDetail {
     container: r.container,
     videoCodec: r.video_codec,
     audioCodec: r.audio_codec,
+    width: r.width,
+    height: r.height,
     needsRemux: r.needs_remux === 1,
+    remuxReason: r.remux_reason,
     overview: r.overview,
     genres: r.genres ? (JSON.parse(r.genres) as string[]) : [],
     trailerYtId: r.trailer_yt_id,
@@ -376,6 +382,34 @@ export function setHidden(db: Db, id: number, hidden: boolean): void {
 
 export function setAgeRating(db: Db, id: number, ageMin: number | null): void {
   db.prepare('UPDATE media SET age_min = ? WHERE id = ?').run(ageMin, id);
+}
+
+/**
+ * Playback position, written back every few seconds and on pause.
+ * Positions inside the first or last 5% are treated as "not partway through",
+ * so a title you just started or just finished doesn't sit in Continue Watching.
+ */
+export function setProgress(db: Db, id: number, positionMs: number): void {
+  const row = db.prepare('SELECT duration_ms FROM media WHERE id = ?').get(id) as
+    | { duration_ms: number | null }
+    | undefined;
+  if (!row) return;
+
+  const duration = row.duration_ms;
+  const trivial =
+    duration !== null && duration > 0 && (positionMs < duration * 0.05 || positionMs > duration * 0.95);
+
+  db.prepare('UPDATE media SET resume_ms = ?, last_played_at = ? WHERE id = ?').run(
+    trivial ? null : positionMs,
+    Date.now(),
+    id
+  );
+}
+
+export function markFinished(db: Db, id: number): void {
+  db.prepare(
+    'UPDATE media SET play_count = play_count + 1, resume_ms = NULL, last_played_at = ? WHERE id = ?'
+  ).run(Date.now(), id);
 }
 
 export function setFields(db: Db, id: number, patch: Record<string, string | null>): MediaDetail {

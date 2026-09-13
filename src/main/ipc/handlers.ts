@@ -1,10 +1,15 @@
 import { existsSync, statSync } from 'node:fs';
-import { basename, extname } from 'node:path';
+import { stat } from 'node:fs/promises';
 import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
 import type { z } from 'zod';
-import { IPC_CHANNELS, type IpcChannel, type IpcMap } from '@shared/ipc-contract';
+import {
+  IPC_CHANNELS,
+  type EventMap,
+  type EventName,
+  type IpcChannel,
+  type IpcMap,
+} from '@shared/ipc-contract';
 import { argSchemas } from '@shared/schemas';
-import type { MediaKind } from '@shared/types';
 import { getDatabase } from '../db/connection';
 import * as mediaRepo from '../db/repos/media';
 import * as sourcesRepo from '../db/repos/sources';
@@ -13,17 +18,26 @@ import * as settings from '../settings';
 import * as providers from '../providers/registry';
 import * as restrictions from '../restrictions';
 import { ffmpegAvailable } from '../ffmpeg';
+import { importPaths, scanSource } from '../library/scanner';
+import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../library/walk';
+import type { MediaServer } from '../server/server';
 
-const VIDEO_EXT = new Set([
-  '.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v', '.wmv', '.flv', '.mpg', '.mpeg', '.ts', '.m2ts',
-]);
-const AUDIO_EXT = new Set([
-  '.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.wma', '.aiff',
-]);
+/**
+ * A scan runs in main and can take minutes on a large library, so exactly one
+ * runs at a time and it is cancellable. The flag lives here rather than in the
+ * scanner so `library:cancelScan` has something to flip.
+ */
+let scanCancelled = false;
+let scanRunning = false;
 
 type Handlers = { [K in IpcChannel]: (...args: IpcMap[K]['args']) => Promise<IpcMap[K]['result']> };
 
-function makeHandlers(getWindow: () => BrowserWindow | null): Handlers {
+export interface HandlerDeps {
+  getWindow: () => BrowserWindow | null;
+  server: MediaServer;
+}
+
+function makeHandlers({ getWindow, server }: HandlerDeps): Handlers {
   return {
     async 'app:info'() {
       const db = getDatabase();
@@ -68,44 +82,67 @@ function makeHandlers(getWindow: () => BrowserWindow | null): Handlers {
       return mediaRepo.get(getDatabase(), id);
     },
 
+    /**
+     * Dropping a FOLDER walks it recursively rather than skipping it, which is
+     * what anyone dropping a season folder expects (AAR-M0 D4).
+     */
     async 'library:import'(paths) {
       const db = getDatabase();
-      let imported = 0;
-      let skipped = 0;
-      db.transaction(() => {
-        for (const p of paths) {
-          const ext = extname(p).toLowerCase();
-          const kind: MediaKind | null = VIDEO_EXT.has(ext)
-            ? 'video'
-            : AUDIO_EXT.has(ext)
-              ? 'audio'
-              : null;
-          if (!kind || !existsSync(p)) {
-            skipped++;
-            continue;
+      const { imported, skipped } = await importPaths(db, paths, {
+        stat: async (p) => {
+          try {
+            const st = await stat(p);
+            return { isDirectory: st.isDirectory(), size: st.size, mtimeMs: st.mtimeMs };
+          } catch {
+            return null;
           }
-          const st = statSync(p);
-          if (!st.isFile()) {
-            skipped++;
-            continue;
-          }
-          mediaRepo.insert(db, {
-            kind,
-            path: p,
-            fileName: basename(p),
-            ext,
-            sizeBytes: st.size,
-            mtimeMs: Math.round(st.mtimeMs),
-          });
-          imported++;
-        }
-      })();
+        },
+      });
+      emit('library:changed', { reason: 'import' });
       return { imported, skipped };
+    },
+
+    async 'library:scan'(kind, full) {
+      if (scanRunning) throw new Error('A scan is already running');
+      const db = getDatabase();
+      const sources = sourcesRepo.getAll(db).filter((s) => s.enabled && (!kind || s.kind === kind));
+      if (sources.length === 0) {
+        throw new Error(
+          kind
+            ? `No ${kind === 'video' ? 'movies' : 'music'} folder is set — choose one first`
+            : 'No library folders are set — choose one first'
+        );
+      }
+
+      scanRunning = true;
+      scanCancelled = false;
+      try {
+        const results = [];
+        for (const source of sources) {
+          results.push(
+            await scanSource(db, source, {
+              full,
+              isCancelled: () => scanCancelled,
+              onProgress: (p) => emit('scan:progress', p),
+            })
+          );
+        }
+        emit('library:changed', { reason: 'scan' });
+        return results;
+      } finally {
+        scanRunning = false;
+      }
+    },
+
+    async 'library:cancelScan'() {
+      scanCancelled = true;
     },
 
     async 'library:pickFiles'(kind) {
       const win = getWindow();
-      const extensions = [...(kind === 'video' ? VIDEO_EXT : AUDIO_EXT)].map((e) => e.slice(1));
+      const extensions = [...(kind === 'video' ? VIDEO_EXTENSIONS : AUDIO_EXTENSIONS)].map((e) =>
+        e.slice(1)
+      );
       const result = await dialog.showOpenDialog(win!, {
         title: kind === 'video' ? 'Add videos' : 'Add music',
         properties: ['openFile', 'multiSelections', 'dontAddToRecent'],
@@ -138,6 +175,24 @@ function makeHandlers(getWindow: () => BrowserWindow | null): Handlers {
     async 'library:setAgeRating'(id, ageMin) {
       requireUnlocked();
       mediaRepo.setAgeRating(getDatabase(), id, ageMin);
+    },
+
+    async 'media:streamUrl'(id) {
+      // Throws if the item is restricted or missing — resolve() applies §23.
+      mediaRepo.get(getDatabase(), id);
+      return server.urlFor(id);
+    },
+
+    async 'player:progress'(id, positionMs) {
+      mediaRepo.setProgress(getDatabase(), id, positionMs);
+    },
+
+    async 'player:finished'(id) {
+      mediaRepo.markFinished(getDatabase(), id);
+    },
+
+    async 'server:status'() {
+      return server.status();
     },
 
     async 'restrictions:get'() {
@@ -215,6 +270,13 @@ function requireUnlocked(): void {
   }
 }
 
+/** Push an event to the renderer. Silent when the window is gone. */
+let emitTo: (() => BrowserWindow | null) | null = null;
+function emit<E extends EventName>(event: E, payload: EventMap[E]): void {
+  const win = emitTo?.();
+  if (win && !win.isDestroyed()) win.webContents.send(event, payload);
+}
+
 let dbPathValue = '';
 export function setDbPathForInfo(p: string): void {
   dbPathValue = p;
@@ -228,8 +290,9 @@ function dbPath(): string {
  * matching Zod schema first. A channel with no schema is a startup error,
  * not a silently unvalidated hole.
  */
-export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void {
-  const handlers = makeHandlers(getWindow);
+export function registerIpcHandlers(deps: HandlerDeps): void {
+  emitTo = deps.getWindow;
+  const handlers = makeHandlers(deps);
 
   for (const channel of IPC_CHANNELS) {
     const schema = argSchemas[channel] as z.ZodType<unknown[]>;

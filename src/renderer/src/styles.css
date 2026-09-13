@@ -221,3 +221,83 @@ footer {
 .fatal-stack {
   color: var(--dim);
 }
+
+/* Playback (M1) */
+.player {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 88%);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+}
+
+.player-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.player-bar strong {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player video {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: #000;
+}
+
+.player-error {
+  margin: auto;
+  max-width: 560px;
+  padding: 24px;
+  text-align: center;
+  color: #ffb4b4;
+  line-height: 1.7;
+}
+
+button.link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: rgb(255 255 255 / 20%);
+  text-underline-offset: 3px;
+}
+
+button.link:hover:not(:disabled) {
+  text-decoration-color: var(--accent);
+}
+
+tr.missing td {
+  opacity: 0.45;
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgb(255 255 255 / 8%);
+  color: var(--dim);
+}
+
+.badge.resume {
+  background: rgb(91 157 255 / 18%);
+  color: var(--accent);
+}

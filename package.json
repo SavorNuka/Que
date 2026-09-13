@@ -34,6 +34,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:skins": "vitest run tests/skins",
+    "test:smoke": "node scripts/smoke-test.mjs",
     "check": "npm run typecheck && npm run lint && npm run test",
     "db:path": "node scripts/db-cli.mjs path",
     "db:migrate": "node scripts/db-cli.mjs migrate",

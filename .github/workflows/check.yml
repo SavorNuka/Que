@@ -44,3 +44,7 @@ jobs:
       - run: npm ci --ignore-scripts
       # prebuild fetches the Electron binary; ffmpeg is not needed to bundle.
       - run: npm run build
+      # Launches the real app and asserts the window loads, the preload bridge
+      # is live and the UI mounted. This is the gate that catches a blank
+      # window — see docs/AAR-M0.md D2.
+      - run: npm run test:smoke

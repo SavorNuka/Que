@@ -20,6 +20,8 @@ import type {
   ProviderStatus,
   RestrictionSettings,
   RestrictionState,
+  ScanResult,
+  ServerStatus,
   Settings,
   SortSpec,
   Source,
@@ -44,8 +46,15 @@ export interface IpcMap {
     args: [id: number, patch: Record<string, string | null>];
     result: MediaDetail;
   };
+  'library:scan': { args: [kind: MediaKind | null, full: boolean]; result: ScanResult[] };
+  'library:cancelScan': { args: []; result: void };
   'library:setHidden': { args: [id: number, hidden: boolean]; result: void };
   'library:setAgeRating': { args: [id: number, ageMin: number | null]; result: void };
+
+  'media:streamUrl': { args: [id: number]; result: string };
+  'player:progress': { args: [id: number, positionMs: number]; result: void };
+  'player:finished': { args: [id: number]; result: void };
+  'server:status': { args: []; result: ServerStatus };
 
   'restrictions:get': { args: []; result: RestrictionState };
   'restrictions:set': { args: [patch: Partial<RestrictionSettings>]; result: RestrictionState };
@@ -84,8 +93,14 @@ export const IPC_CHANNELS = [
   'library:pickFiles',
   'library:setRating',
   'library:setFields',
+  'library:scan',
+  'library:cancelScan',
   'library:setHidden',
   'library:setAgeRating',
+  'media:streamUrl',
+  'player:progress',
+  'player:finished',
+  'server:status',
   'restrictions:get',
   'restrictions:set',
   'restrictions:setPin',
@@ -108,7 +123,15 @@ export type _AssertNoMissingChannels = Missing extends never ? true : ['missing 
 
 /** Events pushed main -> renderer. */
 export interface EventMap {
-  'scan:progress': { kind: MediaKind; scanned: number; total: number; done: boolean };
+  'scan:progress': {
+    kind: MediaKind;
+    scanned: number;
+    added: number;
+    updated: number;
+    moved: number;
+    current: string | null;
+    done: boolean;
+  };
   'library:changed': { reason: 'import' | 'scan' | 'edit' | 'remove' };
   'provider:rateLimited': { provider: string; retryAfterMs: number };
 }

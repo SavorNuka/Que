@@ -1,8 +1,9 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, session, shell } from 'electron';
-import { openDatabase, setDatabase, closeDatabase } from './db/connection';
+import { openDatabase, setDatabase, closeDatabase, getDatabase } from './db/connection';
 import { registerIpcHandlers, setDbPathForInfo } from './ipc/handlers';
 import { registerQueProtocol, registerQueScheme } from './protocol/que';
+import { MediaServer } from './server/server';
 import { load as loadSettings } from './settings';
 
 // Must run before app is ready — see ASSUMPTIONS.md A3.
@@ -10,6 +11,13 @@ registerQueScheme();
 
 let mainWindow: BrowserWindow | null = null;
 const isDev = !app.isPackaged;
+
+/**
+ * Playback is served over HTTP on loopback rather than a custom protocol
+ * (ASSUMPTIONS.md A2), so the app window and, later, other devices on the
+ * network share one streaming path with real Range support.
+ */
+const mediaServer = new MediaServer(() => getDatabase());
 
 /**
  * Renderer CSP.
@@ -91,7 +99,11 @@ function createWindow(): void {
     }
   });
 
-  if (isDev) mainWindow.webContents.openDevTools({ mode: 'right' });
+  if (isDev && process.env['QUE_SMOKE'] !== '1') {
+    mainWindow.webContents.openDevTools({ mode: 'right' });
+  }
+
+  if (process.env['QUE_SMOKE'] === '1') void runSmokeTest(mainWindow);
 
   // Nothing in this app opens a new window; external links go to the OS browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -112,6 +124,61 @@ function createWindow(): void {
     void mainWindow.loadURL(devServer);
   } else {
     void mainWindow.loadFile(join(import.meta.dirname, '../renderer/index.html'));
+  }
+}
+
+/**
+ * Startup self-check (AAR-M0 P3).
+ *
+ * Exercises the real boot path — window, preload bridge, IPC, database — and
+ * exits with a status. This is the gate that would have caught the blank
+ * window in seconds instead of a filesystem investigation: a preload that
+ * fails to load leaves window.que undefined, which fails here loudly.
+ */
+async function runSmokeTest(win: BrowserWindow): Promise<void> {
+  const fail = (message: string): void => {
+    console.error(`SMOKE FAIL: ${message}`);
+    app.exit(1);
+  };
+
+  const timeout = setTimeout(() => fail('timed out waiting for the renderer'), 30_000);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      if (!win.webContents.isLoading()) return resolve();
+      win.webContents.once('did-finish-load', () => resolve());
+      win.webContents.once('did-fail-load', (_e, code, description) =>
+        reject(new Error(`renderer failed to load: ${description} (${code})`))
+      );
+    });
+
+    const bridge = (await win.webContents.executeJavaScript(
+      'typeof window.que'
+    )) as string;
+    if (bridge !== 'object') {
+      throw new Error(`preload bridge missing — typeof window.que is "${bridge}"`);
+    }
+
+    const info = (await win.webContents.executeJavaScript(
+      'window.que["app:info"]()'
+    )) as { sqlite: string; electron: string };
+    if (!info?.sqlite) throw new Error('app:info did not answer');
+
+    // A renderer that threw during render leaves the root element empty —
+    // exactly the blank-window failure mode.
+    const rendered = (await win.webContents.executeJavaScript(
+      'document.getElementById("root")?.childElementCount ?? 0'
+    )) as number;
+    if (rendered < 1) throw new Error('the renderer mounted nothing into #root');
+
+    clearTimeout(timeout);
+    console.log(
+      `SMOKE PASS: Electron ${info.electron}, SQLite ${info.sqlite}, bridge live, UI rendered`
+    );
+    app.exit(0);
+  } catch (e) {
+    clearTimeout(timeout);
+    fail(e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -140,7 +207,19 @@ app.whenReady().then(() => {
 
   applySecurityHeaders();
   registerQueProtocol();
-  registerIpcHandlers(() => mainWindow);
+  registerIpcHandlers({ getWindow: () => mainWindow, server: mediaServer });
+
+  const { server } = loadSettings();
+  if (server.enabled) {
+    mediaServer
+      .start(server.port, server.lanEnabled)
+      .then((status) =>
+        console.log(`[server] listening on ${status.host}:${status.port}`)
+      )
+      .catch((e: unknown) => {
+        console.error('[server] could not start — playback will not work:', e);
+      });
+  }
 
   createWindow();
 
@@ -154,5 +233,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  void mediaServer.stop();
   closeDatabase();
 });
