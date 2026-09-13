@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Downloaded binaries — fetched by `npm run fetch:ffmpeg`, ~200 MB
+resources/bin/
+
+# Local databases and their WAL sidecars
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+
+# Test and tooling output
+coverage/
+.eslintcache
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

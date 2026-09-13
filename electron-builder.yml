@@ -1,0 +1,37 @@
+appId: dev.que.app
+productName: Que
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+
+extraResources:
+  # The ffmpeg sidecar (ARCHITECTURE §2.1). Absent in a fresh clone until
+  # `npm run fetch:ffmpeg` runs, so the build must not fail without it.
+  - from: resources/bin
+    to: bin
+    filter:
+      - '**/*'
+
+asarUnpack:
+  - '**/*.node'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${productName} ${version} ${target}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+
+publish: null

@@ -1,0 +1,25 @@
+# Normalise to LF in the repository; Git for Windows checks out natively.
+* text=auto eol=lf
+
+# Windows scripts want CRLF on disk.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Never touch these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.exe  binary
+*.dll  binary
+*.node binary
+*.db   binary
+
+# Keep diffs readable where it helps, and quiet where it doesn't.
+package-lock.json -diff linguist-generated
+*.sql  text diff=sql

@@ -1,0 +1,223 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --line: #252a34;
+  --text: #e6e8ec;
+  --dim: #8b93a3;
+  --accent: #5b9dff;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    14px/1.5 'Segoe UI Variable Text',
+    'Segoe UI',
+    system-ui,
+    sans-serif;
+}
+
+.app {
+  min-height: 100%;
+  padding: 20px 24px 40px;
+  max-width: 1100px;
+  margin: 0 auto;
+  transition: outline-color 120ms ease;
+  outline: 2px dashed transparent;
+  outline-offset: -12px;
+}
+
+.app.dragging {
+  outline-color: var(--accent);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+input[type='search'] {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: inherit;
+  font: inherit;
+}
+
+input[type='search']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.row-label {
+  width: 70px;
+  color: var(--dim);
+}
+
+.row-value {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.status,
+.hint,
+.empty,
+.dim,
+.count {
+  color: var(--dim);
+}
+
+.hint,
+.empty {
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
+.count {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+}
+
+td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgb(255 255 255 / 4%);
+}
+
+footer {
+  margin-top: 24px;
+  font-size: 12px;
+}
+
+/* Failure surfaces — see ErrorBoundary.tsx. Never show a blank window. */
+.fatal {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+
+.fatal h1 {
+  font-size: 18px;
+  margin: 0 0 16px;
+  color: #ff8b8b;
+}
+
+.fatal-hint {
+  color: var(--dim);
+  line-height: 1.7;
+}
+
+.fatal code {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.fatal-error,
+.fatal-stack {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  overflow: auto;
+  max-height: 320px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fatal-stack {
+  color: var(--dim);
+}
