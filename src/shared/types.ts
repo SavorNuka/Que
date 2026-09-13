@@ -246,6 +246,10 @@ export interface ServerStatus {
   host: string;
   lanEnabled: boolean;
   token: string | null;
+  /** Why the server isn't running, when it isn't. Surfaced in the UI. */
+  error: string | null;
+  /** True when the configured port was taken and another was used instead. */
+  usedFallbackPort: boolean;
 }
 
 export interface ProviderStatus {

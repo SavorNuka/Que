@@ -328,6 +328,10 @@ Requires SQLite ≥ 3.45, asserted at startup in `db/connection.ts`. Measured co
 
 One contract file in `shared/ipc-contract.ts` gives both sides the same types. Every handler validates its argument with a Zod schema before touching the DB or the filesystem — the renderer is treated as untrusted.
 
+**One definition per wire shape.** Anything that crosses this boundary is declared once, in `@shared/types`, and re-exported by the module that produces it — never declared again in main. AAR-M1 D1 found `ScanResult` and `ServerStatus` each declared twice. They were structurally identical, so nothing complained; that is the problem. Divergence is then caught in one direction only: if the shared type gains a required field the handler fails to typecheck, but if the *main* type gains one the renderer silently never learns about it.
+
+**Validation and dispatch are one function.** `createDispatch()` parses with the channel's schema and calls the handler; `registerIpcHandlers()` hands that same function to `ipcMain`. Tests round-trip through it rather than through a copy, so the error text and the handler body under test are the ones that actually run (AAR-M1 P1).
+
 ```
 library:list        (filter, sort, page)        → MediaSummary[]
 library:get         (id)                        → MediaDetail
@@ -571,6 +575,58 @@ Apple publishes no hard limit but throttles aggressively (roughly 20 calls/minut
 ### 10.4 Artwork cache
 
 Everything downloaded is written to `userData/artwork/<mediaId>-<hash>.jpg` and referenced by `media.thumb_path`. The renderer loads it through `que://art/<id>`. The user can always override with `library:setThumb` from a local file, a URL, or the current video frame — `thumb_source = 'user'` then pins it so a later re-fetch won't clobber their choice.
+
+### 10.5 Concurrency, rate limits and idempotency (M1b)
+
+Built in M1b, before any provider exists, because every provider depends on it. The design and the measurements behind it are in [PRA-M1b.md](PRA-M1b.md); the harness that produced them is [sanity-tests/idempotency.mjs](sanity-tests/idempotency.mjs). This section is the contract.
+
+**No provider fetches for itself.** A provider supplies a URL, a parser and an origin reference; the request goes through `ProviderClient.request()`. Anything calling `fetch` directly bypasses the cache, the deduplication and the rate gate at once, and will eventually earn a temporary block from MusicBrainz.
+
+**Two mechanisms, two problems, not interchangeable.** Measured, 24 jobs:
+
+| Workload | Pool 1 | Pool 8 |
+|---|---|---|
+| Local work (ffprobe-like) | 487 ms | **61 ms** |
+| Rate-limited (MusicBrainz-like) | 595 ms | **602 ms** |
+
+A worker pool is an 8× win on local work and worth nothing against a rate limiter — worse than nothing, because eight workers turn a polite queue into a burst. So **pool size is never a rate control**: local work gets `Pool`, remote work gets deduplication plus `RateGate`.
+
+**The key identifies the request, not the row.**
+
+```
+v1:<provider>:<capability>:<origin-kind>:<origin-id>:<params-hash>
+```
+
+Two failure modes, both measured. Keyed too coarsely — one key for a batch of twelve rows — gives 1 call and **1 of 12 rows correct**, with eleven rows silently receiving another row's data. Keyed too finely — on `media.id` — gives twelve identical calls for one album and throws away 158 minutes of rate budget on a 5,000-track library. Grounding the key in the resource's own identity avoids both: rows that legitimately want the same resource share a key by design, rows that want different resources can never collide.
+
+`origin-id` is an external identifier where one exists (MBID, IMDb, TMDB), otherwise a digest of the normalised natural key. `params-hash` covers everything else that varies the response — language, format, region, limit. A key omitting `language` returned the English subtitles for a Spanish request; the rule is mechanical, and if it goes in the request it goes in the hash.
+
+**Cache and in-flight map.** A cache alone does not survive concurrency: twelve simultaneous callers all check, all miss, all execute. Tracking the in-flight promise closes that window — 12 calls become 1. Both checks happen before any `await`, which better-sqlite3's synchronous driver makes possible, so the check-then-act race is unreachable rather than merely unlikely.
+
+| Layer | Lifetime | Storage |
+|---|---|---|
+| In-memory LRU | process | — |
+| Persistent | until invalidated | `provider_cache` (migration 004) |
+
+`provider_cache` replaces the URL-keyed `http_cache` from migration 001, which could not express a key that is deliberately not a URL. `applied_ops` in the same migration is the per-row ledger: metadata application is one transaction per row keyed by the same origin key, so a cancelled pass leaves N complete rows and is safe to re-run.
+
+**Outcome policy.** Three outcomes, three lifetimes — and two that are never stored.
+
+| Outcome | Cached | Lifetime |
+|---|---|---|
+| Success | yes | until explicitly invalidated |
+| Definitive negative (404/410, or a `null` result) | yes | 30 days |
+| Rate-limited (429) | **no** | retried through the gate |
+| Transient (5xx, socket, timeout) | **no** | retried with backoff + jitter |
+| Malformed | **no** | not retried; surfaced |
+
+A failure to ask is not an answer. The in-flight entry is cleared in `finally`, not `then` — clearing only on success leaves a rejected promise under that key for the life of the process, and one network blip makes a title permanently unmatchable until restart.
+
+**Cancellation detaches; it does not cancel.** The shared promise is owned by the coalescer, never by whichever caller arrived first. A caller that aborts leaves; the request is abandoned only when the last joiner does. Passing the caller's signal straight through to the request is the obvious implementation and is wrong in a way that shows only under cancellation.
+
+**Invalidation.** "Re-match this item" clears `provider_cache` by origin *and* `applied_ops` by media id. Clearing only the cache repeats the fetch and still skips the apply.
+
+**Restrictions are unaffected.** §23 is enforced in the query layer against the row. Nothing in the cache can change what a query returns, and there is a test that warms the cache with a harmless-looking rating and asserts the list, the search and the streaming server all still refuse the item.
 
 ---
 
@@ -950,7 +1006,9 @@ The full command reference — every npm script, what it does, and when you'd re
 | # | Milestone | Contents |
 |---|---|---|
 | **M0** ✅ | Scaffold | electron-vite + TS + React, window, preload bridge, SQLite + migrations, typed IPC contract with Zod validation, provider registry, `que://` protocol, **hiding + age limits (§23)**, ffmpeg fetch + db CLI, lint/typecheck/46 tests |
-| **M1** | Library & playback | source paths, scan, drag-drop + dialog import, ffprobe + remux pipe, `que://` protocol, grid + detail, `<video>` playback, resume |
+| **M1** ✅ | Library & playback | source paths, scan, drag-drop + dialog import, ffprobe, HTTP/Range streaming server, grid + detail, `<video>` playback, resume |
+| **M1b** | Concurrency & idempotency | bounded pool + rate gate + retry as one shared utility, idempotency keys, single-flight, two-layer response cache, per-row transactional apply, pooled ffprobe, IPC round-trip tests |
+| **M1c** | HLS transcode | on-demand remux/transcode for MKV and HEVC, segment cache, player fallback path |
 | **M2** | Search & filter | FTS5 index + reindex hooks, global search box with operators, `FilterSpec` builder, facet sidebar, sorting, keyset pagination |
 | **M3** | Metadata & artwork | provider registry + chain, Cinemeta, MusicBrainz/CAA, optional TMDB, auto-match, manual match UI, metadata editor incl. custom fields, custom thumbnails, ratings |
 | **M4** | Subtitles, lyrics & trailers | sidecar + embedded extraction, OpenSubtitles v3, optional Wyzie, SRT → TextTrack, lyrics.ovh panel, trailer window + YouTube fallback |
@@ -962,7 +1020,7 @@ The full command reference — every npm script, what it does, and when you'd re
 | **M10** | Skins | folder format, sanitizer + its test corpus, iframe host, binding/action/slot engine, six bundled skins, skin library with favorites, group-screen skinning, validation panel |
 | **M11** | Package & polish | electron-builder, first-run wizard, empty states, error surfaces, provider status panel, restrictions UI (§23.5) |
 
-M0–M1 is the point where it becomes a usable thing. M2 lands early because search and filtering shape the library UI's data layer — retrofitting them later means rewriting it. M6 before M7 for the same reason: the grouping model has to be right before screens are built on top of it, and M6 alone is already useful with default layouts. Everything else is additive and can be reordered freely.
+M0–M1 is the point where it becomes a usable thing. **M1b was split out of the original M1b, which bundled concurrency with HLS** — they share no code, no risk and no verification method, and bundling a fast deterministic phase with a slow empirical one means both get reviewed with half the attention (PRA-M1b §7). M1b sits before M2 because it is on the critical path for M3–M5 and M9, and because the scanner is a cheap local consumer to validate the utility against before the metadata phase bets on it. M1c blocks nothing until a user has an unplayable file, and the 415 response already tells them why. M2 lands early because search and filtering shape the library UI's data layer — retrofitting them later means rewriting it. M6 before M7 for the same reason: the grouping model has to be right before screens are built on top of it, and M6 alone is already useful with default layouts. Everything else is additive and can be reordered freely.
 
 ---
 

@@ -239,3 +239,108 @@ describe('MediaServer', () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe('MediaServer port handling', () => {
+  let db: Db;
+
+  beforeEach(() => {
+    db = freshDb();
+  });
+  afterEach(() => db.close());
+
+  /**
+   * AAR-M1 D4: a taken port used to reject and leave playback silently broken,
+   * with the reason only in a terminal.
+   */
+  it('falls back to another port when the configured one is taken, and says so', async () => {
+    const first = new MediaServer(() => db);
+    const a = await first.start(0);
+
+    const second = new MediaServer(() => db);
+    const b = await second.start(a.port);
+
+    expect(b.running).toBe(true);
+    expect(b.usedFallbackPort).toBe(true);
+    expect(b.port).not.toBe(a.port);
+    expect((await fetch(`http://127.0.0.1:${b.port}/health`)).status).toBe(200);
+
+    await first.stop();
+    await second.stop();
+  });
+
+  it('reports not-running before start', () => {
+    const s = new MediaServer(() => db).status();
+    expect(s.running).toBe(false);
+    expect(s.token).toBeNull();
+  });
+
+  it('refuses to mint a URL while stopped', () => {
+    expect(() => new MediaServer(() => db).urlFor(1)).toThrow();
+  });
+});
+
+describe('playback progress', () => {
+  let db: Db;
+
+  const add = (durationMs: number | null): number => {
+    const info = db
+      .prepare(
+        `INSERT INTO media (kind, path, file_name, ext, added_at, duration_ms)
+         VALUES ('video', ?, 'x.mp4', '.mp4', ?, ?)`
+      )
+      .run(`/m/${Math.random()}.mp4`, Date.now(), durationMs);
+    return Number(info.lastInsertRowid);
+  };
+  const row = (id: number): { resume_ms: number | null; play_count: number } =>
+    db.prepare('SELECT resume_ms, play_count FROM media WHERE id = ?').get(id) as never;
+
+  beforeEach(() => {
+    db = freshDb();
+  });
+  afterEach(() => db.close());
+
+  it('stores a mid-file position', async () => {
+    const { setProgress } = await import('../src/main/db/repos/media');
+    const id = add(100_000);
+    setProgress(db, id, 50_000);
+    expect(row(id).resume_ms).toBe(50_000);
+  });
+
+  /** Just-started and nearly-finished are not "partway through". */
+  it('ignores a position in the first 5%', async () => {
+    const { setProgress } = await import('../src/main/db/repos/media');
+    const id = add(100_000);
+    setProgress(db, id, 2_000);
+    expect(row(id).resume_ms).toBeNull();
+  });
+
+  it('ignores a position in the last 5%', async () => {
+    const { setProgress } = await import('../src/main/db/repos/media');
+    const id = add(100_000);
+    setProgress(db, id, 99_000);
+    expect(row(id).resume_ms).toBeNull();
+  });
+
+  it('stores a position for a file of unknown duration', async () => {
+    const { setProgress } = await import('../src/main/db/repos/media');
+    const id = add(null);
+    setProgress(db, id, 30_000);
+    expect(row(id).resume_ms).toBe(30_000);
+  });
+
+  it('clears resume and counts a play when finished', async () => {
+    const { setProgress, markFinished } = await import('../src/main/db/repos/media');
+    const id = add(100_000);
+    setProgress(db, id, 50_000);
+    markFinished(db, id);
+
+    const r = row(id);
+    expect(r.resume_ms).toBeNull();
+    expect(r.play_count).toBe(1);
+  });
+
+  it('does nothing for an id that does not exist', async () => {
+    const { setProgress } = await import('../src/main/db/repos/media');
+    expect(() => setProgress(db, 9999, 1000)).not.toThrow();
+  });
+});

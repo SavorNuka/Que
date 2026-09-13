@@ -217,6 +217,8 @@ app.whenReady().then(() => {
         console.log(`[server] listening on ${status.host}:${status.port}`)
       )
       .catch((e: unknown) => {
+        // The failure is recorded on the server's status, which the UI reads,
+        // so this is no longer only a line in a terminal (AAR-M1 D4).
         console.error('[server] could not start — playback will not work:', e);
       });
   }

@@ -1,4 +1,25 @@
-# Que
+```
+--                                             
+--            * ***                            
+--          *  ****                            
+--         *  *  ***                           
+--        *  **   ***                          
+--       *  ***    *** **   ****               
+--      **   **     **  **    ***  *    ***    
+--      **   **     **  **     ****    * ***   
+--      **   **     **  **      **    *   ***  
+--      **   **     **  **      **   **    *** 
+--      **   **     **  **      **   ********  
+--       **  ** *** **  **      **   *******   
+--        ** *   ****   **      **   **        
+--         ***     ***   ******* **  ****    * 
+--          ******* **    *****   **  *******  
+--            ***   **                 *****   
+--                  **                         
+--                  *                          
+--                 *                           
+--                *                                                                   
+```
 
 A local personal media library and video/music player for Windows. Point it at a movies folder
 and a music folder, and it catalogues, tags, rates, groups, plays, subtitles, and streams them —
@@ -38,8 +59,8 @@ Troubleshooting.)
 ## First run
 
 ```powershell
-git clone <your-remote> D:\Projects\Que
-cd D:\Projects\Que
+git clone <your-remote> %PATH%\Que
+cd %PATH%\Que
 npm install
 npm run dev
 ```
@@ -63,7 +84,7 @@ Then, in the app: **Settings → Library** → set a folder for *Movies* and a f
 
 ## Command reference
 
-All commands run from `D:\Projects\Que` in PowerShell.
+All commands run from `%PATH%\Que` in PowerShell.
 
 Commands marked **(M*n*)** arrive with that milestone and are not in `package.json` yet.
 Everything unmarked works today.
@@ -100,8 +121,10 @@ Everything unmarked works today.
 | `npm run format` | Prettier over `src/`, `skins/`, and `docs/`. |
 | `npm test` | Vitest, single run. |
 | `npm run test:watch` | Vitest in watch mode. |
+| `npm run test:concurrency` | Re-runs the concurrency and idempotency suites **20 times each**. Concurrency defects are non-deterministic, so a suite that passed once has not been shown to pass. Stands in for CI until there's a remote — see [docs/PRA-M1b.md](docs/PRA-M1b.md) §10. |
+| `npm run bench` | Cold-scan benchmark. Generates real media with ffmpeg, scans it at pool sizes 1–16, and prints per-file timings plus a 20,000-file projection. Takes about a minute; excluded from the normal test run. |
 | `npm run test:skins` **(M10)** | Runs **only** the skin sanitizer suite against the XSS fixture corpus. Run this after any change to `src/main/skins/sanitize.ts` — it is the security boundary for user-authored skins. |
-| `npm run check` | `typecheck` + `lint` + `test`. What CI would run. |
+| `npm run check` | `typecheck` + `lint` + `test` + `test:concurrency`. What CI would run, if there were CI. |
 
 ### Database
 
@@ -118,11 +141,17 @@ Everything unmarked works today.
 
 | Command | What it does |
 |---|---|
-| `npm run scan` **(M1)** | Scans the configured source folders and exits. Same code path as the in-app scan; handy for a scheduled task. |
-| `npm run scan -- --kind=video` **(M1)** | Scans only the movie source. `--kind=audio` for music. |
-| `npm run scan -- --full` **(M1)** | Ignores mtime/hash shortcuts and re-probes every file. Slow; use after changing the probe logic. |
+Scanning is available in the app today (**Settings → Library → Scan**). The commands below
+are the headless equivalents, and none of them exist yet.
+
+| Command | What it does |
+|---|---|
+| `npm run scan` **(M2)** | Scans the configured source folders and exits. Same code path as the in-app scan; handy for a scheduled task. |
+| `npm run scan -- --kind=video` **(M2)** | Scans only the movie source. `--kind=audio` for music. |
+| `npm run scan -- --full` **(M2)** | Ignores mtime/hash shortcuts and re-probes every file. Slow; use after changing the probe logic. |
+| `npm run scan -- --concurrency=4` **(M2)** | Overrides how many ffprobe processes run at once. Defaults to your core count, capped at 8 — probing is CPU-bound, so more than that buys nothing. |
 | `npm run artwork:prune` **(M3)** | Deletes cached artwork with no matching library row. Skips group hero images you uploaded. |
-| `npm run cache:clear` **(M3)** | Clears the provider HTTP response cache. Forces fresh metadata lookups. |
+| `npm run cache:clear` **(M3)** | Empties the provider response cache (`provider_cache`) and the applied-operations ledger, so the next scan re-fetches metadata from scratch. In the app this is per-item: **re-match** on a single title clears only that one. |
 
 ### Groups
 
@@ -224,6 +253,8 @@ recovery: if you forget it, delete the `restrictions` and `pin` keys from
 | `Error: Electron uninstall` at `getElectronPath` | Electron's binary isn't on disk. Electron 42+ no longer downloads it during `npm install` — see the note below. `npm run fetch:electron` fixes it, and `npm run dev` now does that automatically. |
 | `Que needs SQLite >= 3.45` on startup | The bundled SQLite is too old for `contentless_delete` FTS5. Reinstall dependencies; don't downgrade `better-sqlite3` below 13. |
 | A video shows a black screen with audio, or won't play at all | Unsupported codec. Check `npm run db:stats` for `needs_remux` counts and confirm `resources\bin\ffmpeg.exe` exists — `npm run fetch:ffmpeg` if not. |
+| Nothing plays, and the window shows "the media server isn't running" | Playback is served over `http://127.0.0.1`, so a dead server means dead playback. The banner carries the reason. A port clash is handled automatically — Que falls back to an OS-assigned port and the footer says so. |
+| The first scan of a large library is slow | Expected, and it's ffprobe, not Que — our own code is about 2% of a cold scan. Probing runs in parallel across your cores (capped at 8); it's CPU-bound, so it will not go faster than your machine allows. Rescans skip anything whose size and mtime are unchanged. Run `npm run bench` for real numbers on your hardware. |
 | Gamepad does nothing | Chromium only reveals a controller after you press a button on it, with the Que window focused. Press **A** once, then check **Settings → Controller**. |
 | Global search misses recently edited items | `npm run db:reindex`. |
 | Other devices can't reach the server | The server is off by default — enable it in **Settings → Server**. On first start, allow Que through Windows Firewall on **private** networks. |
@@ -237,11 +268,42 @@ recovery: if you forget it, delete the `restrictions` and `pin` keys from
 
 ## Documentation
 
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — process model, data model, IPC surface, provider chains, grouping, skin sanitization, LAN server, restrictions, milestones.
-- **[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md)** — the pre-implementation sanity check: every load-bearing assumption, how it was tested, and what had to change.
+Two kinds, and the difference matters: **living** documents describe Que as it is now and are
+updated every milestone; **point-in-time** records are written once and never edited, because
+their value is being an honest account of what was known at the time.
+
+### Living
+
+| Doc | What it is |
+|---|---|
+| **[README.md](README.md)** | This file. Install, commands, paths, troubleshooting. |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | Process model, data model, IPC surface, provider chains, concurrency and idempotency, grouping, skin sanitization, LAN server, restrictions, milestones. |
+| **[docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md)** | Every load-bearing assumption, how it was tested, and what had to change — including the ones later overturned by implementation (§H). |
+| **[docs/PROCESS.md](docs/PROCESS.md)** | How a milestone is run: the assessment before, the freeze, the review after, and the standing rules that came out of them. |
+
+### Point-in-time
+
+| Doc | Phase |
+|---|---|
+| [docs/PRA-M1b.md](docs/PRA-M1b.md) | Risk & integration assessment, written before M1b |
+| [docs/M1-SCOPE.md](docs/M1-SCOPE.md) · [docs/M1b-SCOPE.md](docs/M1b-SCOPE.md) | Frozen scopes |
+| [docs/AAR-M0.md](docs/AAR-M0.md) · [docs/AAR-M1.md](docs/AAR-M1.md) · [docs/AAR-M1b.md](docs/AAR-M1b.md) | After-action reviews |
+| [docs/sanity-tests/](docs/sanity-tests/) | The runnable harnesses behind the assumption register |
+
+---
 
 ## Status
 
-**M0 complete.** Scaffold, database schema and migrations, typed IPC contract with runtime
-validation, search index, provider registry, hiding and age limits. Typecheck, lint and 46
-tests pass. Next up is M1: source scanning, the import pipeline, and playback.
+**M0, M1 and M1b complete.** Scaffold and schema; source scanning, import, HTTP/Range
+playback with resume; and a shared concurrency, rate-limiting and idempotency layer with
+parallel probing.
+
+| | |
+|---|---|
+| Gates | typecheck clean · lint clean · **351 tests** · 153 of them re-run 20× |
+| Works today | set source folders, scan (including nested folders), drag-and-drop or dialog import, catalogue with search, play with resume, hide items and set age limits |
+| Not yet | metadata, artwork, subtitles, lyrics, playlists, grouping, skins, gamepad, LAN server |
+| Next | **M1c** — HLS transcode for MKV and HEVC. Then **M2** — search, filters and the real library UI. |
+
+Provider chains are registered and reported in Settings, but no provider is implemented yet —
+that's M3. The plumbing they will run on is finished and tested.

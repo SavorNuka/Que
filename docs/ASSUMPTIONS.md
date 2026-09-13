@@ -1,13 +1,21 @@
 # Que — Assumptions Register
 
-A pre-implementation sanity check on every load-bearing assumption in
-[ARCHITECTURE.md](docs/ARCHITECTURE.md). Each was tested, not asserted.
+A living record of every load-bearing assumption in
+[ARCHITECTURE.md](ARCHITECTURE.md). Each was tested, not asserted.
 
-Run 2026-09-13. Test scripts are reproducible; method is stated per row.
+Sections A–G are the **pre-implementation** sanity check, run 2026-09-13 before any code
+existed. Section H is **what implementation overturned since** — assumptions that survived
+the sanity check and did not survive contact with a running system. It grows each milestone;
+per [PROCESS.md](PROCESS.md), adding to it is part of closing a phase.
 
-**Verdict summary: 19 assumptions checked — 13 confirmed, 4 corrected, 2 wrong.**
+Test scripts are reproducible; method is stated per row.
+
+**Pre-implementation verdict: 19 assumptions checked — 13 confirmed, 4 corrected, 2 wrong.**
 The two wrong ones both sit in the playback path and change the design. Nothing
 found invalidates the overall architecture.
+
+**Since implementation began: 3 overturned** (§H), one of which changed a measurement we had
+been reasoning from for two milestones.
 
 ---
 
@@ -228,16 +236,85 @@ Honest list of what this environment can't settle. None is architecture-threaten
 | 2 | Document SQLite ≥ 3.45 as a hard minimum | M0 |
 | 3 | Search debounce 120 ms → 60 ms | M2 |
 | 4 | Mandatory `quote()` helper for all FTS input | M2 |
-| 5 | **Playback served over `http://127.0.0.1` by the local server**, not `que://`; HLS + hls.js for transcoded content; LAN and local share one path | M1 |
+| 5 | **Playback served over `http://127.0.0.1` by the local server**, not `que://`; HLS + hls.js for transcoded content; LAN and local share one path | M1 (HTTP/Range) · M1c (HLS) |
 | 6 | `que://` reduced to artwork / subtitles / skin assets | M1 |
 | 7 | `registerSchemesAsPrivileged` with `stream: true` | M0 |
 | 8 | CSP gains `media-src http://127.0.0.1:*` | M0 |
-| 9 | Remux treated as the common path (MKV), not an edge case; audio-only transcode for AC-3/DTS | M1 |
+| 9 | Remux treated as the common path (MKV), not an edge case; audio-only transcode for AC-3/DTS | M1c |
 | 10 | README: VS Build Tools demoted from Requirements to Troubleshooting | M0 |
 | 11 | `sharp` → Electron `nativeImage` | M7 |
 | 12 | Skin sanitizer test suite must include a positive control | M10 |
 
 Items 5 and 6 are the only structural ones, and they make the system smaller. Everything else is a one-line correction.
+
+---
+
+## H. Overturned after implementation began
+
+Assumptions that passed the pre-implementation check — or were never questioned, which is
+worse — and were falsified by a running system. Each names the milestone that found it.
+
+### H1. ⛔ WRONG — ffprobe is I/O-bound, so a deep pool will parallelise it freely
+
+*Held through M1 and M1b's planning. Overturned by M1b's benchmark ([AAR-M1b](AAR-M1b.md) §3).*
+
+AAR-M1 D3 measured a cold scan as "98% ffprobe wait" and everyone, including the PRA built on
+top of it, read *wait* as *I/O wait*. It is not. Measured across pool sizes on a 2-core
+machine:
+
+```
+  pool 1   52.17 ms/file   1.00×
+  pool 2   26.57 ms/file   1.96×
+  pool 4   26.34 ms/file   1.98×
+  pool 8   26.58 ms/file   1.96×
+  pool 16  26.98 ms/file   1.93×
+```
+
+Speed-up saturates at exactly the core count and never moves again. ffprobe is a subprocess
+decoding container headers on a CPU, not a request waiting on a platter. The 98% figure was
+right about where wall-clock goes and wrong about why.
+
+**What changed.** Not the design — a pool is still correct and still delivers everything the
+hardware allows. What changed is the ceiling: `defaultProbeConcurrency()` tracks
+`availableParallelism()` capped at 8, and the cap is justified by "past the core count there
+is nothing to gain" rather than by a guess about disk depth. The exit-criterion assertion was
+rewritten from a flat `> 2×` to a fraction of `min(cores, maxPool)`, because a flat threshold
+fails a 2-core machine achieving 100% of what it has.
+
+**Still open:** the projection for a 20,000-file library on real hardware. On 2 cores it is
+8.8 min; at 8 cores the arithmetic says ~2.2 min. Arithmetic, not a measurement — `npm run
+bench` on the Windows machine settles it.
+
+### H2. ⛔ WRONG — `http_cache` (migration 001) can serve as the provider response cache
+
+*Assumed in [PRA-M1b](PRA-M1b.md) §5.4. Overturned during M1b ([AAR-M1b](AAR-M1b.md) D3).*
+
+`http_cache` is keyed by URL. The key the idempotency design produces is deliberately **not**
+a URL: two library rows resolving to the same release must share one entry even when their
+request URLs differ, and one URL must not serve two languages. A URL-keyed table cannot
+express either.
+
+**What changed.** Migration 004 replaces it with `provider_cache`, keyed by idempotency key
+and carrying provider, capability and origin as indexed columns. `http_cache` had never been
+written to — no provider had shipped — so nothing was migrated.
+
+### H3. ⚠️ CORRECTED — one unique idempotency key per row
+
+*Corrected in [PRA-M1b](PRA-M1b.md) §4 C4, before implementation, by
+[`sanity-tests/idempotency.mjs`](sanity-tests/idempotency.mjs).*
+
+Recorded here because it is the most expensive assumption the project has had, and it was
+caught only because someone ran it rather than reasoning about it.
+
+A key per *row* is right about collisions and wrong about sharing. Twelve tracks from one
+album are twelve rows legitimately wanting the same release lookup; keyed on `media.id` that
+is twelve identical network calls, and against MusicBrainz's 1 req/s the deduplication saving
+on a 5,000-track library — 158 minutes — disappears entirely. Keyed too coarsely instead (one
+key for a batch) the harness measured 1 call, 1 distinct result, and **1 of 12 rows correct**.
+
+**What changed.** The key identifies the *request*, not the row: origin identity plus every
+parameter that varies the response. Rows wanting the same resource share a key by design;
+rows wanting different resources cannot collide.
 
 ---
 
@@ -248,3 +325,7 @@ Items 5 and 6 are the only structural ones, and they make the system smaller. Ev
 | `fts.js` | First FTS5 pass — the run that exposed A1 |
 | `fts2.js` | Corrected FTS5 suite, 9/9 passing, plus 50k-row benchmarks |
 | `skin-sandbox2.js` | Chromium iframe sandbox suite with positive control |
+| `idempotency.mjs` | Concurrency and idempotency semantics — the run that exposed H3 |
+
+The cold-scan benchmark behind H1 lives in the repo rather than here, because it needs the
+scanner: `npm run bench`.

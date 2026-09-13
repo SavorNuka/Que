@@ -1,11 +1,14 @@
 import { existsSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { basename } from 'node:path';
-import type { MediaKind } from '@shared/types';
+import type { MediaKind, ScanResult } from '@shared/types';
+import { Pool } from '../concurrency';
 import type { Db } from '../db/connection';
 import { reindexMedia } from '../db/search';
 import { quickHash } from './hash';
 import { probeFile, type ProbeResult } from './probe';
-import { walkMedia, type WalkEntry } from './walk';
+import { kindForExtension, walkMedia, type WalkEntry } from './walk';
+import type { EventMap } from '@shared/ipc-contract';
 
 /**
  * Library scanning.
@@ -21,32 +24,24 @@ import { walkMedia, type WalkEntry } from './walk';
  *     probed) skip both hashing and ffprobe entirely.
  *  4. **One bad file cannot stop a scan.** Every per-file failure is counted
  *     and reported, never thrown.
+ *  5. **Probing runs concurrently.** AAR-M1 D3 measured a cold scan at 98%
+ *     ffprobe wait, serial — 43.5 ms/file, ~14.5 min at 20,000 files, with our
+ *     own code accounting for the other 2%. Probes now go through a bounded
+ *     pool while row bookkeeping stays serial, because the bookkeeping is the
+ *     2% and SQLite writes here are synchronous anyway.
  */
 
-export interface ScanProgress {
-  kind: MediaKind;
-  scanned: number;
-  added: number;
-  updated: number;
-  moved: number;
-  /** Current file, for display. */
-  current: string | null;
-  done: boolean;
-}
+/**
+ * Wire shapes live in @shared/types and are re-exported here rather than
+ * redeclared. AAR-M1 D1: ScanResult and ServerStatus were each defined twice,
+ * once in main and once in shared. They were structurally identical so nothing
+ * complained, but two definitions of one wire shape drift the moment someone
+ * edits the nearer one.
+ */
+export type { ScanResult };
 
-export interface ScanResult {
-  kind: MediaKind;
-  scanned: number;
-  added: number;
-  updated: number;
-  moved: number;
-  missing: number;
-  unchanged: number;
-  failed: number;
-  errors: { path: string; message: string }[];
-  cancelled: boolean;
-  durationMs: number;
-}
+/** Progress events use the contract's shape (EventMap['scan:progress']). */
+export type ScanProgress = EventMap['scan:progress'];
 
 export interface ScanOptions {
   /** Re-probe everything, ignoring the size/mtime fast path. */
@@ -55,6 +50,18 @@ export interface ScanOptions {
   isCancelled?: () => boolean;
   /** Injectable so tests don't need an ffprobe binary. */
   probe?: (path: string, ext: string) => Promise<ProbeResult>;
+  /**
+   * How many probes may run at once. Defaults to the machine's parallelism,
+   * capped — ffprobe is a subprocess per file, so this is a process count, and
+   * past a point the disk becomes the limit rather than the CPU (PRA-M1b §12
+   * falsification 1).
+   */
+  concurrency?: number;
+}
+
+/** ffprobe is one subprocess per file; 8 is plenty and 1 is the old behaviour. */
+export function defaultProbeConcurrency(): number {
+  return Math.min(8, Math.max(2, availableParallelism()));
 }
 
 interface ExistingRow {
@@ -162,7 +169,15 @@ export async function scanSource(
     if (result.errors.length < 50) result.errors.push({ path, message });
   };
 
-  const handle = async (entry: WalkEntry): Promise<void> => {
+  /**
+   * Stage A — serial. Resolve the row: fast path, hash, insert, relocate.
+   *
+   * Kept serial deliberately. It is the 2% of a cold scan, every step of it is
+   * a synchronous SQLite write, and doing it in walk order means the move
+   * detection in the `byHash` lookup sees a stable picture. Returns the id that
+   * still needs a probe, or null when the fast path already handled the file.
+   */
+  const resolveRow = async (entry: WalkEntry): Promise<number | null> => {
     result.scanned++;
 
     const existing = byPath.get(entry.path) as ExistingRow | undefined;
@@ -178,7 +193,7 @@ export async function scanSource(
     ) {
       touchSeen.run(marker, existing.id);
       result.unchanged++;
-      return;
+      return null;
     }
 
     const hash = await quickHash(entry.path, entry.sizeBytes);
@@ -238,27 +253,37 @@ export async function scanSource(
       }
     }
 
-    // Probe last: the row exists either way, so a probe failure costs the
-    // technical detail but never the catalogue entry.
-    try {
-      const p = await probe(entry.path, entry.ext);
-      applyProbe.run({
-        id,
-        durationMs: p.durationMs,
-        container: p.container,
-        videoCodec: p.videoCodec,
-        audioCodec: p.audioCodec,
-        width: p.width,
-        height: p.height,
-        needsRemux: p.needsRemux ? 1 : 0,
-        remuxReason: p.remuxReason,
-        probedAt: Date.now(),
-      });
-    } catch (e) {
-      noteError(entry.path, e);
-    }
+    // The row exists before the probe is attempted, which is what makes a
+    // probe failure cost the technical detail and never the catalogue entry.
+    return id;
+  };
 
-    reindexMedia(db, id);
+  /**
+   * Stage B — pooled. The probe, and the write that applies it.
+   *
+   * The write runs in the settle callback rather than inside the task: it is a
+   * synchronous SQLite statement on the single JS thread, so it cannot
+   * interleave with another write, and keeping it out of the task means the
+   * pool's concurrency bounds subprocesses rather than transactions.
+   */
+  const pool = new Pool({
+    size: Math.max(1, options.concurrency ?? defaultProbeConcurrency()),
+    isCancelled,
+  });
+
+  const applyProbeResult = (id: number, p: ProbeResult): void => {
+    applyProbe.run({
+      id,
+      durationMs: p.durationMs,
+      container: p.container,
+      videoCodec: p.videoCodec,
+      audioCodec: p.audioCodec,
+      width: p.width,
+      height: p.height,
+      needsRemux: p.needsRemux ? 1 : 0,
+      remuxReason: p.remuxReason,
+      probedAt: Date.now(),
+    });
   };
 
   for await (const entry of walkMedia(source.path, {
@@ -267,10 +292,28 @@ export async function scanSource(
   })) {
     if (isCancelled?.()) break;
 
+    let id: number | null = null;
     try {
-      await handle(entry);
+      id = await resolveRow(entry);
     } catch (e) {
       noteError(entry.path, e);
+    }
+
+    if (id !== null) {
+      const rowId = id;
+      // submit() resolves when there is room in the queue, not when the probe
+      // finishes — that is the backpressure that stops a walk of 20,000 files
+      // buffering 20,000 pending probes.
+      await pool.submit(
+        () => probe(entry.path, entry.ext),
+        (settled) => {
+          if (settled.ok) applyProbeResult(rowId, settled.value);
+          // A cancellation is not a failure. Without this guard, cancelling a
+          // scan of 20,000 files would report 20,000 errors.
+          else if (!isCancelled?.()) noteError(entry.path, settled.error);
+          reindexMedia(db, rowId);
+        }
+      );
     }
 
     if (result.scanned % 25 === 0) {
@@ -285,6 +328,10 @@ export async function scanSource(
       });
     }
   }
+
+  // Every probe must have landed before the missing sweep runs, or a file that
+  // was found would be marked gone.
+  await pool.drain();
 
   // walkMedia returns silently when cancelled, so the loop above can end
   // without ever running its own check. Ask once more here.
@@ -350,7 +397,6 @@ export async function importPaths(
     }
 
     const ext = p.slice(p.lastIndexOf('.')).toLowerCase();
-    const { kindForExtension } = await import('./walk');
     const kind = kindForExtension(ext);
     if (!kind) {
       skipped++;
@@ -360,6 +406,18 @@ export async function importPaths(
   }
 
   const byPath = db.prepare(`SELECT id FROM media WHERE path = ?`);
+  const applyProbe = db.prepare(
+    `UPDATE media SET duration_ms = ?, container = ?, video_codec = ?, audio_codec = ?,
+                      width = ?, height = ?, needs_remux = ?, remux_reason = ?, probed_at = ?
+       WHERE id = ?`
+  );
+
+  // Same split as scanSource: rows resolved serially, probes pooled. A dropped
+  // season folder is a few hundred files, and the wait is all ffprobe.
+  const pool = new Pool({
+    size: Math.max(1, options.concurrency ?? defaultProbeConcurrency()),
+    isCancelled,
+  });
 
   for (const entry of entries) {
     if (isCancelled?.()) break;
@@ -393,26 +451,29 @@ export async function importPaths(
         );
       const id = Number(info.lastInsertRowid);
 
-      try {
-        const p = await probe(entry.path, entry.ext);
-        db.prepare(
-          `UPDATE media SET duration_ms = ?, container = ?, video_codec = ?, audio_codec = ?,
-                            width = ?, height = ?, needs_remux = ?, remux_reason = ?, probed_at = ?
-             WHERE id = ?`
-        ).run(
-          p.durationMs, p.container, p.videoCodec, p.audioCodec,
-          p.width, p.height, p.needsRemux ? 1 : 0, p.remuxReason, Date.now(), id
-        );
-      } catch {
-        // Catalogued without technical detail; still playable if the format allows.
-      }
+      await pool.submit(
+        () => probe(entry.path, entry.ext),
+        (settled) => {
+          if (settled.ok) {
+            const p = settled.value;
+            applyProbe.run(
+              p.durationMs, p.container, p.videoCodec, p.audioCodec,
+              p.width, p.height, p.needsRemux ? 1 : 0, p.remuxReason, Date.now(), id
+            );
+          }
+          // A probe failure leaves the item catalogued without technical
+          // detail; it still plays if the format allows.
+          reindexMedia(db, id);
+        }
+      );
 
-      reindexMedia(db, id);
       imported++;
     } catch {
       failed++;
     }
   }
+
+  await pool.drain();
 
   return { imported, skipped, failed };
 }

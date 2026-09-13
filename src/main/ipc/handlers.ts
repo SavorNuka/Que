@@ -22,14 +22,6 @@ import { importPaths, scanSource } from '../library/scanner';
 import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../library/walk';
 import type { MediaServer } from '../server/server';
 
-/**
- * A scan runs in main and can take minutes on a large library, so exactly one
- * runs at a time and it is cancellable. The flag lives here rather than in the
- * scanner so `library:cancelScan` has something to flip.
- */
-let scanCancelled = false;
-let scanRunning = false;
-
 type Handlers = { [K in IpcChannel]: (...args: IpcMap[K]['args']) => Promise<IpcMap[K]['result']> };
 
 export interface HandlerDeps {
@@ -38,6 +30,16 @@ export interface HandlerDeps {
 }
 
 function makeHandlers({ getWindow, server }: HandlerDeps): Handlers {
+  /**
+   * A scan runs in main and can take minutes on a large library, so exactly
+   * one runs at a time and it is cancellable. These live in the closure rather
+   * than at module scope: as module state they would leak between dispatchers,
+   * which is how "a scan is already running" turns into a test-order-dependent
+   * failure and, in the app, into a scan button that stays dead after a reload.
+   */
+  let scanCancelled = false;
+  let scanRunning = false;
+
   return {
     async 'app:info'() {
       const db = getDatabase();
@@ -285,27 +287,48 @@ function dbPath(): string {
   return dbPathValue;
 }
 
+export type Dispatch = <K extends IpcChannel>(
+  channel: K,
+  ...rawArgs: unknown[]
+) => Promise<IpcMap[K]['result']>;
+
 /**
- * Registers every channel in IPC_CHANNELS, validating arguments with the
- * matching Zod schema first. A channel with no schema is a startup error,
- * not a silently unvalidated hole.
+ * Validate-then-handle, in one place.
+ *
+ * AAR-M1 P1: M1 shipped 30 argument-validation tests and no round-trips, so
+ * nothing tested that a validated call actually reaches the right repository
+ * and returns the right shape. Extracting the dispatch means the round-trip
+ * tests exercise the real path — schema, error text and all — rather than a
+ * copy of it that can drift from what `ipcMain` actually runs.
+ */
+export function createDispatch(deps: HandlerDeps): Dispatch {
+  const handlers = makeHandlers(deps);
+
+  return async <K extends IpcChannel>(channel: K, ...rawArgs: unknown[]) => {
+    const schema = argSchemas[channel] as z.ZodType<unknown[]> | undefined;
+    if (!schema) throw new Error(`No argument schema registered for IPC channel "${channel}"`);
+
+    const parsed = schema.safeParse(rawArgs);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+      throw new Error(`Invalid arguments for ${channel} — ${issues}`);
+    }
+
+    const handler = handlers[channel] as (...a: unknown[]) => Promise<IpcMap[K]['result']>;
+    return handler(...(parsed.data as unknown[]));
+  };
+}
+
+/**
+ * Registers every channel in IPC_CHANNELS. A channel with no schema is a
+ * startup error, not a silently unvalidated hole.
  */
 export function registerIpcHandlers(deps: HandlerDeps): void {
   emitTo = deps.getWindow;
-  const handlers = makeHandlers(deps);
+  const dispatch = createDispatch(deps);
 
   for (const channel of IPC_CHANNELS) {
-    const schema = argSchemas[channel] as z.ZodType<unknown[]>;
-    if (!schema) throw new Error(`No argument schema registered for IPC channel "${channel}"`);
-    const handler = handlers[channel] as (...a: unknown[]) => Promise<unknown>;
-
-    ipcMain.handle(channel, async (_event, ...rawArgs: unknown[]) => {
-      const parsed = schema.safeParse(rawArgs);
-      if (!parsed.success) {
-        const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
-        throw new Error(`Invalid arguments for ${channel} — ${issues}`);
-      }
-      return handler(...(parsed.data as unknown[]));
-    });
+    if (!argSchemas[channel]) throw new Error(`No argument schema registered for IPC channel "${channel}"`);
+    ipcMain.handle(channel, async (_event, ...rawArgs: unknown[]) => dispatch(channel, ...rawArgs));
   }
 }

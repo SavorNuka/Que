@@ -5,6 +5,7 @@ import type {
   MediaSummary,
   ProviderStatus,
   ScanResult,
+  ServerStatus,
   Source,
 } from '@shared/types';
 import { Player } from './Player';
@@ -129,6 +130,7 @@ function Library(): React.JSX.Element {
   const [info] = useAsync<AppInfo>(() => window.que['app:info'](), []);
   const [sources, , reloadSources] = useAsync<Source[]>(() => window.que['sources:get'](), []);
   const [providers] = useAsync<ProviderStatus[]>(() => window.que['providers:status'](), []);
+  const [server] = useAsync<ServerStatus>(() => window.que['server:status'](), []);
 
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<MediaSummary[]>([]);
@@ -354,11 +356,26 @@ function Library(): React.JSX.Element {
         </table>
       </section>
 
+      {/* AAR-M1 D4: a media server that failed to start used to be visible
+          only in a terminal, leaving playback mysteriously dead. */}
+      {server && !server.running && (
+        <p className="warn">
+          The media server isn&apos;t running, so nothing will play.
+          {server.error ? ` ${server.error}` : ''}
+        </p>
+      )}
+
       <footer>
         {info && (
           <span className="dim">
             Que {info.version} · Electron {info.electron} · Chromium {info.chrome} · SQLite{' '}
             {info.sqlite} · ffmpeg {info.ffmpegAvailable ? 'ready' : 'missing (npm run fetch:ffmpeg)'}
+            {server?.running && (
+              <>
+                {' '}· server :{server.port}
+                {server.usedFallbackPort && ' (configured port was taken)'}
+              </>
+            )}
           </span>
         )}
       </footer>

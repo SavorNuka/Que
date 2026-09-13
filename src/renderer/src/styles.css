@@ -301,3 +301,13 @@ tr.missing td {
   background: rgb(91 157 255 / 18%);
   color: var(--accent);
 }
+
+.warn {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid rgb(255 180 120 / 35%);
+  background: rgb(255 180 120 / 8%);
+  border-radius: 8px;
+  color: #ffc48b;
+  font-size: 13px;
+}

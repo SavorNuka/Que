@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname } from 'node:path';
 import type { Db } from '../db/connection';
 import { mediaClauses } from '../restrictions';
+import type { ServerStatus } from '@shared/types';
 
 /**
  * Local media server.
@@ -22,15 +23,8 @@ import { mediaClauses } from '../restrictions';
  *    the app window, not more.
  */
 
-export interface ServerStatus {
-  running: boolean;
-  port: number;
-  /** Loopback only unless LAN sharing is explicitly enabled. */
-  host: string;
-  lanEnabled: boolean;
-  /** Included so the renderer can build URLs; it is not a secret from itself. */
-  token: string | null;
-}
+/** Defined once, in @shared/types — see AAR-M1 D1. */
+export type { ServerStatus };
 
 const MIME: Record<string, string> = {
   '.mp4': 'video/mp4',
@@ -105,6 +99,8 @@ export class MediaServer {
   private token: string | null = null;
   private port = 0;
   private lanEnabled = false;
+  private error: string | null = null;
+  private usedFallbackPort = false;
 
   constructor(private readonly db: () => Db) {}
 
@@ -115,6 +111,8 @@ export class MediaServer {
       host: this.lanEnabled ? '0.0.0.0' : '127.0.0.1',
       lanEnabled: this.lanEnabled,
       token: this.token,
+      error: this.error,
+      usedFallbackPort: this.usedFallbackPort,
     };
   }
 
@@ -124,12 +122,22 @@ export class MediaServer {
     return `http://127.0.0.1:${this.port}/stream/${id}?t=${this.token}`;
   }
 
+  /**
+   * Start listening.
+   *
+   * AAR-M1 D4: a taken port used to reject, get logged to a terminal nobody is
+   * reading, and leave playback silently broken. The configured port is a
+   * preference, not a requirement — if it is in use, fall back to one the OS
+   * picks and say so in the status, which the UI shows.
+   */
   async start(port: number, lanEnabled = false): Promise<ServerStatus> {
     if (this.server) return this.status();
 
     // A fresh token per run: a URL from a previous session is dead on arrival.
     this.token = randomBytes(24).toString('base64url');
     this.lanEnabled = lanEnabled;
+    this.error = null;
+    this.usedFallbackPort = false;
 
     const server = createServer((req, res) => {
       this.handle(req, res).catch((e: unknown) => {
@@ -143,13 +151,31 @@ export class MediaServer {
     server.headersTimeout = 10_000;
     server.requestTimeout = 0; // a long download is not a stalled request
 
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, lanEnabled ? '0.0.0.0' : '127.0.0.1', () => {
-        server.removeListener('error', reject);
-        resolve();
+    const host = lanEnabled ? '0.0.0.0' : '127.0.0.1';
+
+    const listen = (p: number): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const onError = (e: Error): void => reject(e);
+        server.once('error', onError);
+        server.listen(p, host, () => {
+          server.removeListener('error', onError);
+          resolve();
+        });
       });
-    });
+
+    try {
+      await listen(port);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'EADDRINUSE' || port === 0) {
+        this.error = e instanceof Error ? e.message : String(e);
+        this.token = null;
+        throw e;
+      }
+      // Port 0 asks the OS for any free port.
+      await listen(0);
+      this.usedFallbackPort = true;
+    }
 
     const address = server.address();
     this.port = typeof address === 'object' && address !== null ? address.port : port;
@@ -162,6 +188,7 @@ export class MediaServer {
     if (!server) return;
     this.server = null;
     this.token = null;
+    this.usedFallbackPort = false;
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 

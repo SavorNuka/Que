@@ -35,13 +35,15 @@
     "test:watch": "vitest",
     "test:skins": "vitest run tests/skins",
     "test:smoke": "node scripts/smoke-test.mjs",
-    "check": "npm run typecheck && npm run lint && npm run test",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run test:concurrency",
     "db:path": "node scripts/db-cli.mjs path",
     "db:migrate": "node scripts/db-cli.mjs migrate",
     "db:reset": "node scripts/db-cli.mjs reset",
     "db:reindex": "node scripts/db-cli.mjs reindex",
     "db:vacuum": "node scripts/db-cli.mjs vacuum",
-    "db:stats": "node scripts/db-cli.mjs stats"
+    "db:stats": "node scripts/db-cli.mjs stats",
+    "test:concurrency": "vitest run tests/concurrency tests/idempotency --repeats=20",
+    "bench": "QUE_BENCH=1 vitest run tests/bench"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
