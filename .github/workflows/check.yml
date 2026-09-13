@@ -1,0 +1,46 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 24 LTS. Node 25 is end-of-life and several dev dependencies exclude it.
+          node-version: '24'
+          cache: npm
+
+      # --ignore-scripts skips the Electron binary (~120 MB) and the ffmpeg
+      # sidecar (~200 MB). Neither is needed to typecheck, lint or run the
+      # tests, which exercise the database and renderer layers only.
+      - run: npm ci --ignore-scripts
+
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+  build:
+    # Proves the app actually bundles, which the gates above do not.
+    runs-on: windows-latest
+    needs: check
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+      # prebuild fetches the Electron binary; ffmpeg is not needed to bundle.
+      - run: npm run build
