@@ -267,7 +267,7 @@ their value is being an honest account of what was known at the time.
 |---|---|
 | [docs/PRA-M1b.md](docs/PRA-M1b.md) · [docs/PRA-M1c.md](docs/PRA-M1c.md) | Risk & integration assessments, written before each phase |
 | [docs/M1-SCOPE.md](docs/M1-SCOPE.md) · [docs/M1b-SCOPE.md](docs/M1b-SCOPE.md) · [docs/M1c-SCOPE.md](docs/M1c-SCOPE.md) | Frozen scopes |
-| [docs/AAR-M0.md](docs/AAR-M0.md) · [docs/AAR-M1.md](docs/AAR-M1.md) · [docs/AAR-M1b.md](docs/AAR-M1b.md) | After-action reviews — M1c's is not yet written |
+| [docs/AAR-M0.md](docs/AAR-M0.md) · [docs/AAR-M1.md](docs/AAR-M1.md) · [docs/AAR-M1b.md](docs/AAR-M1b.md) · [docs/AAR-M1c.md](docs/AAR-M1c.md) | After-action reviews |
 | [docs/sanity-tests/](docs/sanity-tests/) | The runnable harnesses behind the assumption register |
 
 ---
@@ -292,7 +292,7 @@ launched the built app, added the folder, scanned, played a file end to end thro
 `/hls/*` routes, and seeked mid-playback. That run caught two real bugs the test suite couldn't
 see (a page-relative URL resolving against the wrong origin, and a segment route that never
 matched what ffmpeg actually wrote into the playlist) — see
-[docs/PRA-M1c.md](docs/PRA-M1c.md) and, once written, its AAR.
+[docs/PRA-M1c.md](docs/PRA-M1c.md) and [docs/AAR-M1c.md](docs/AAR-M1c.md).
 
 Provider chains are registered and reported in Settings, but no provider is implemented yet —
 that's M3. The plumbing they will run on is finished and tested.
