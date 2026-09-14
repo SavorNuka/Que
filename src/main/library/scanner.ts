@@ -5,6 +5,7 @@ import type { MediaKind, ScanResult } from '@shared/types';
 import { Pool } from '../concurrency';
 import type { Db } from '../db/connection';
 import { reindexMedia } from '../db/search';
+import type { ConcurrencyBudget } from '../transcode/budget';
 import { quickHash } from './hash';
 import { probeFile, type ProbeResult } from './probe';
 import { kindForExtension, walkMedia, type WalkEntry } from './walk';
@@ -57,11 +58,41 @@ export interface ScanOptions {
    * falsification 1).
    */
   concurrency?: number;
+  /**
+   * When supplied, the probe pool shrinks while an active transcode holds
+   * cores from this budget and grows back once it releases them (PRA-M1c
+   * §5.4). Omitted, a scan sizes itself exactly as before M1c.
+   */
+  budget?: ConcurrencyBudget;
 }
 
 /** ffprobe is one subprocess per file; 8 is plenty and 1 is the old behaviour. */
 export function defaultProbeConcurrency(): number {
   return Math.min(8, Math.max(2, availableParallelism()));
+}
+
+/**
+ * Builds the probe pool and, if a shared budget was supplied, wires it to
+ * resize as transcode jobs reserve and release cores. `release()` must be
+ * called once the pool has drained, or the subscription outlives the scan.
+ */
+/** Exported for its own test (PRA-M1c §9 item 11g) — not part of the public scan API. */
+export function createProbePool(options: {
+  concurrency?: number;
+  isCancelled?: () => boolean;
+  budget?: ConcurrencyBudget;
+}): { pool: Pool; release: () => void } {
+  const target = Math.max(1, options.concurrency ?? defaultProbeConcurrency());
+  const { budget } = options;
+  const initialSize = budget ? Math.max(1, Math.min(target, budget.available)) : target;
+
+  const pool = new Pool({ size: initialSize, isCancelled: options.isCancelled });
+
+  const unsubscribe = budget?.onChange(() => {
+    pool.resize(Math.max(1, Math.min(target, budget.available)));
+  });
+
+  return { pool, release: () => unsubscribe?.() };
 }
 
 interface ExistingRow {
@@ -266,9 +297,10 @@ export async function scanSource(
    * interleave with another write, and keeping it out of the task means the
    * pool's concurrency bounds subprocesses rather than transactions.
    */
-  const pool = new Pool({
-    size: Math.max(1, options.concurrency ?? defaultProbeConcurrency()),
+  const { pool, release: releasePool } = createProbePool({
+    concurrency: options.concurrency,
     isCancelled,
+    budget: options.budget,
   });
 
   const applyProbeResult = (id: number, p: ProbeResult): void => {
@@ -332,6 +364,7 @@ export async function scanSource(
   // Every probe must have landed before the missing sweep runs, or a file that
   // was found would be marked gone.
   await pool.drain();
+  releasePool();
 
   // walkMedia returns silently when cancelled, so the loop above can end
   // without ever running its own check. Ask once more here.
@@ -414,9 +447,10 @@ export async function importPaths(
 
   // Same split as scanSource: rows resolved serially, probes pooled. A dropped
   // season folder is a few hundred files, and the wait is all ffprobe.
-  const pool = new Pool({
-    size: Math.max(1, options.concurrency ?? defaultProbeConcurrency()),
+  const { pool, release: releasePool } = createProbePool({
+    concurrency: options.concurrency,
     isCancelled,
+    budget: options.budget,
   });
 
   for (const entry of entries) {
@@ -474,6 +508,7 @@ export async function importPaths(
   }
 
   await pool.drain();
+  releasePool();
 
   return { imported, skipped, failed };
 }

@@ -230,7 +230,7 @@ recovery: if you forget it, delete the `restrictions` and `pin` keys from
 | `better-sqlite3` fails to load, `NODE_MODULE_VERSION` mismatch | Shouldn't happen — it's a Node-API module with Windows prebuilds. If it does: `npm run rebuild`. Only if *that* fails do you need VS Build Tools 2022 with the C++ workload. |
 | `Error: Electron uninstall` at `getElectronPath` | Electron's binary isn't on disk. Electron 42+ no longer downloads it during `npm install` — see the note below. `npm run fetch:electron` fixes it, and `npm run dev` now does that automatically. |
 | `Que needs SQLite >= 3.45` on startup | The bundled SQLite is too old for `contentless_delete` FTS5. Reinstall dependencies; don't downgrade `better-sqlite3` below 13. |
-| A video shows a black screen with audio, or won't play at all | Unsupported codec. Check `npm run db:stats` for `needs_remux` counts and confirm `resources\bin\ffmpeg.exe` exists — `npm run fetch:ffmpeg` if not. |
+| A video shows a black screen with audio, or won't play at all | Since M1c, an unsupported codec/container plays through on-demand HLS transcode automatically — check the browser devtools console (dev build) for `/hls/*` request failures first. If nothing at `/hls/<id>/playlist.m3u8` ever returns 200, confirm `resources\bin\ffmpeg.exe` exists (`npm run fetch:ffmpeg` if not); `npm run db:stats` still shows `needs_remux` counts if you want to see how many items need it. |
 | Nothing plays, and the window shows "the media server isn't running" | Playback is served over `http://127.0.0.1`, so a dead server means dead playback. The banner carries the reason. A port clash is handled automatically — Que falls back to an OS-assigned port and the footer says so. |
 | The first scan of a large library is slow | Expected. Probing runs in parallel, but past about two workers the limit is Que's own single-threaded per-file work — roughly 15 ms/file on a fast machine — not your core count, so a 20,000-file first scan lands near 5 minutes however many cores you have. Rescans skip anything whose size and mtime are unchanged. `npm run bench` measures your hardware; `npm run bench -- --dir "D:\Movies"` measures your actual library. |
 | Gamepad does nothing | Chromium only reveals a controller after you press a button on it, with the Que window focused. Press **A** once, then check **Settings → Controller**. |
@@ -265,26 +265,34 @@ their value is being an honest account of what was known at the time.
 
 | Doc | Phase |
 |---|---|
-| [docs/PRA-M1b.md](docs/PRA-M1b.md) | Risk & integration assessment, written before M1b |
-| [docs/M1-SCOPE.md](docs/M1-SCOPE.md) · [docs/M1b-SCOPE.md](docs/M1b-SCOPE.md) | Frozen scopes |
-| [docs/AAR-M0.md](docs/AAR-M0.md) · [docs/AAR-M1.md](docs/AAR-M1.md) · [docs/AAR-M1b.md](docs/AAR-M1b.md) | After-action reviews |
+| [docs/PRA-M1b.md](docs/PRA-M1b.md) · [docs/PRA-M1c.md](docs/PRA-M1c.md) | Risk & integration assessments, written before each phase |
+| [docs/M1-SCOPE.md](docs/M1-SCOPE.md) · [docs/M1b-SCOPE.md](docs/M1b-SCOPE.md) · [docs/M1c-SCOPE.md](docs/M1c-SCOPE.md) | Frozen scopes |
+| [docs/AAR-M0.md](docs/AAR-M0.md) · [docs/AAR-M1.md](docs/AAR-M1.md) · [docs/AAR-M1b.md](docs/AAR-M1b.md) | After-action reviews — M1c's is not yet written |
 | [docs/sanity-tests/](docs/sanity-tests/) | The runnable harnesses behind the assumption register |
 
 ---
 
 ## Status
 
-**M0, M1 and M1b complete.** Scaffold and schema; source scanning, import, HTTP/Range
-playback with resume; and a shared concurrency, rate-limiting and idempotency layer with
-parallel probing.
+**M0 through M1c complete.** Scaffold and schema; source scanning, import, HTTP/Range
+playback with resume; a shared concurrency, rate-limiting and idempotency layer with parallel
+probing; and on-demand HLS remux/transcode so MKV, HEVC and other codecs Chromium can't play
+directly now actually play.
 
 | | |
 |---|---|
-| Gates | typecheck clean · lint clean · **351 tests** · 153 of them re-run 20× |
+| Gates | typecheck clean · lint clean · **425 tests** · 157 of them re-run 20× |
 | CI | `.github/workflows/check.yml` — the four gates on Ubuntu, plus a Windows bundle and the boot smoke test |
-| Works today | set source folders, scan (including nested folders), drag-and-drop or dialog import, catalogue with search, play with resume, hide items and set age limits |
+| Works today | set source folders, scan (including nested folders), drag-and-drop or dialog import, catalogue with search, play with resume (direct or via HLS transcode), seek, hide items and set age limits |
 | Not yet | metadata, artwork, subtitles, lyrics, playlists, grouping, skins, gamepad, LAN server |
-| Next | **M1c** — HLS transcode for MKV and HEVC. Then **M2** — search, filters and the real library UI. |
+| Next | **M2** — search, filters and the real library UI. |
+
+M1c was verified against a real 369-file MKV library (H.264/Vorbis), not just the test suite —
+launched the built app, added the folder, scanned, played a file end to end through the new
+`/hls/*` routes, and seeked mid-playback. That run caught two real bugs the test suite couldn't
+see (a page-relative URL resolving against the wrong origin, and a segment route that never
+matched what ffmpeg actually wrote into the playlist) — see
+[docs/PRA-M1c.md](docs/PRA-M1c.md) and, once written, its AAR.
 
 Provider chains are registered and reported in Settings, but no provider is implemented yet —
 that's M3. The plumbing they will run on is finished and tested.

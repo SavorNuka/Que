@@ -31,19 +31,34 @@ export type RemuxReason = 'container' | 'video-codec' | 'audio-codec';
 /**
  * Containers Chromium can demux. Everything else needs a container remux even
  * when the streams inside are perfectly playable.
+ *
+ * Exported (along with the other playable-sets and `containerPlayable` below)
+ * so the M1c transcode planner (`src/main/transcode/plan.ts`) computes its
+ * per-stream plan from the same rules, rather than a second copy that could
+ * drift — PRA-M1c §4 C1 / R7.
  */
-const PLAYABLE_CONTAINERS = new Set(['mov,mp4,m4a,3gp,3g2,mj2', 'matroska,webm', 'ogg', 'wav', 'mp3', 'flac', 'aac']);
+export const PLAYABLE_CONTAINERS = new Set(['mov,mp4,m4a,3gp,3g2,mj2', 'matroska,webm', 'ogg', 'wav', 'mp3', 'flac', 'aac']);
 
 /**
  * `matroska,webm` is one ffprobe format covering both. WebM is playable and
  * MKV is not, so the container name alone is ambiguous and the file extension
  * breaks the tie.
  */
-const WEBM_EXTENSIONS = new Set(['.webm']);
+export const WEBM_EXTENSIONS = new Set(['.webm']);
 
-const PLAYABLE_VIDEO = new Set(['h264', 'vp8', 'vp9', 'av1', 'theora']);
+export const PLAYABLE_VIDEO = new Set(['h264', 'vp8', 'vp9', 'av1', 'theora']);
 /** HEVC plays only where the platform decodes it; treated as needing help. */
-const PLAYABLE_AUDIO = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac', 'pcm_s16le', 'pcm_s24le', 'pcm_f32le']);
+export const PLAYABLE_AUDIO = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac', 'pcm_s16le', 'pcm_s24le', 'pcm_f32le']);
+
+/** Whether Chromium can demux this container at all — independent of the streams inside it. */
+export function isContainerPlayable(container: string | null, ext: string): boolean {
+  return (
+    container !== null &&
+    PLAYABLE_CONTAINERS.has(container) &&
+    // matroska,webm is only playable when it really is WebM.
+    (container !== 'matroska,webm' || WEBM_EXTENSIONS.has(ext.toLowerCase()))
+  );
+}
 
 interface FfprobeStream {
   codec_type?: string;
@@ -80,13 +95,7 @@ export function interpretProbe(raw: FfprobeOutput, ext: string): ProbeResult {
   let needsRemux = false;
   let remuxReason: RemuxReason | null = null;
 
-  const containerPlayable =
-    container !== null &&
-    PLAYABLE_CONTAINERS.has(container) &&
-    // matroska,webm is only playable when it really is WebM.
-    (container !== 'matroska,webm' || WEBM_EXTENSIONS.has(ext.toLowerCase()));
-
-  if (!containerPlayable) {
+  if (!isContainerPlayable(container, ext)) {
     needsRemux = true;
     remuxReason = 'container';
   } else if (videoCodec !== null && !PLAYABLE_VIDEO.has(videoCodec)) {

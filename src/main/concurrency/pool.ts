@@ -54,7 +54,7 @@ interface Queued<T> {
 }
 
 export class Pool {
-  readonly size: number;
+  #size: number;
 
   #queue: Queued<unknown>[] = [];
   #active = 0;
@@ -71,7 +71,7 @@ export class Pool {
     if (!Number.isInteger(options.size) || options.size < 1) {
       throw new Error(`Pool size must be a positive integer, got ${String(options.size)}`);
     }
-    this.size = options.size;
+    this.#size = options.size;
     this.#queueLimit = options.queueLimit ?? options.size;
     this.#isCancelled = options.isCancelled;
     this.#taskTimeoutMs = options.taskTimeoutMs;
@@ -81,6 +81,10 @@ export class Pool {
       if (options.signal.aborted) this.abort(options.signal.reason);
       else options.signal.addEventListener('abort', () => this.abort(options.signal?.reason), { once: true });
     }
+  }
+
+  get size(): number {
+    return this.#size;
   }
 
   get active(): number {
@@ -144,8 +148,23 @@ export class Pool {
     if (this.idle) this.#release(this.#drainWaiters);
   }
 
+  /**
+   * Change the worker count of a running pool (PRA-M1c §5.4): the probe pool
+   * shrinks while a transcode holds cores from the shared budget and grows
+   * back once it releases them. Shrinking never stops an already-running
+   * task — it only changes how many more are admitted next; growing admits
+   * queued work immediately.
+   */
+  resize(newSize: number): void {
+    if (!Number.isInteger(newSize) || newSize < 1) {
+      throw new Error(`Pool size must be a positive integer, got ${String(newSize)}`);
+    }
+    this.#size = newSize;
+    this.#pump();
+  }
+
   #pump(): void {
-    while (this.#active < this.size && this.#queue.length > 0) {
+    while (this.#active < this.#size && this.#queue.length > 0) {
       const item = this.#queue.shift();
       if (!item) break;
       this.#release(this.#roomWaiters);

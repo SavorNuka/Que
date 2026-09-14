@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { interpretProbe } from '../src/main/library/probe';
-import { cleanup, hasFfmpeg, makeMkv, makeMp3, makeMp4, tempDir } from './helpers/media';
+import { cleanup, ffprobeBin, hasFfmpeg, makeMkv, makeMp3, makeMp4, tempDir } from './helpers/media';
 
 /**
  * The interpretation rules are pure and tested with fixtures; the rules that
@@ -126,7 +126,7 @@ describe('probeFile against real media', () => {
     const { interpretProbe: interpret } = await import('../src/main/library/probe');
     const { execFileSync } = await import('node:child_process');
     const path = makeMp4(dir);
-    const json = execFileSync('ffprobe', [
+    const json = execFileSync(ffprobeBin(), [
       '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-i', path,
     ]).toString();
 
@@ -142,7 +142,7 @@ describe('probeFile against real media', () => {
     const { interpretProbe: interpret } = await import('../src/main/library/probe');
     const { execFileSync } = await import('node:child_process');
     const path = makeMkv(dir);
-    const json = execFileSync('ffprobe', [
+    const json = execFileSync(ffprobeBin(), [
       '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-i', path,
     ]).toString();
 
@@ -158,7 +158,7 @@ describe('probeFile against real media', () => {
     const { interpretProbe: interpret } = await import('../src/main/library/probe');
     const { execFileSync } = await import('node:child_process');
     const path = makeMp3(dir);
-    const json = execFileSync('ffprobe', [
+    const json = execFileSync(ffprobeBin(), [
       '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-i', path,
     ]).toString();
 

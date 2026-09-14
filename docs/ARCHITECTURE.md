@@ -2,8 +2,8 @@
 
 **Que** — a local personal media library and video/music player for Windows.
 
-Status: **M0, M1 and M1b built and verified** — typecheck clean, lint clean, 351 tests, 153 of
-them re-run 20×. Next is M1c. Repo: `D:\Projects\Que`.
+Status: **M0 through M1c built and verified** — typecheck clean, lint clean, 425 tests, 157 of
+them re-run 20×. Next is M2. Repo: `D:\Projects\Que`.
 Corrections from [ASSUMPTIONS.md](ASSUMPTIONS.md) are folded in below.
 Last updated: 2026-09-13.
 
@@ -423,6 +423,35 @@ The revised path:
 
 Every route resolves an integer id against SQLite; no path from the renderer or the network ever reaches `fs`.
 
+**M1c — HLS transcode, built.** `src/main/transcode/` (`plan.ts`, `manager.ts`, `cache.ts`,
+`budget.ts`) plus two routes on `MediaServer`:
+
+- `GET /hls/<id>/playlist.m3u8` and `GET /hls/<id>/<segment>.ts` — the from-start job. A seek
+  past the generated frontier gets its own job at `GET /hls/<id>/seek/<bucketSeconds>/...`, same
+  two paths underneath. **The playlist and its segments live in the same URL directory, always**
+  — ffmpeg writes bare segment filenames into the playlist (`seg00000.ts`, no path prefix,
+  because the files sit side by side on disk), and hls.js resolves those relative to the
+  playlist's own URL. A `/segments/` sub-path under the playlist's URL was tried first and
+  silently 404s every segment — found only by actually running hls.js against it, twice over
+  (the first miss was an `hlsUrl` built as a page-relative string, which resolves against the
+  renderer's `file://` origin instead of the media server's; both are why PRA-M1c's own warning
+  about this milestone — real playback is the correctness gate, not the test suite — held up).
+- The transcode planner computes container/video/audio work **independently** from
+  `media.container/video_codec/audio_codec`, never from the single `remux_reason` enum: a file
+  can need a container remux and an audio transcode at once (MKV + H.264 + AC-3, the common real
+  case named above), and the enum can only ever report one reason.
+- Generation is progressive (`-hls_playlist_type event`): ffmpeg starts writing immediately, the
+  server serves whatever the file currently contains, and the mechanism handles a ~1-second
+  container remux and a multi-minute video transcode identically — they just converge to
+  `#EXT-X-ENDLIST` at different speeds.
+- Segments cache under `userData/transcode/<mediaId>-<fingerprint>/`, fingerprint = size+mtime;
+  a rescan that changes either invalidates the old directory. Size-capped LRU eviction, default
+  5 GB, hardcoded this phase (no Settings UI yet).
+- A transcode job reserves cores from the same budget the probe pool draws down from (§10.5) —
+  transcode is foreground work and gets priority; the probe pool resizes to what's left.
+- Same token auth and `mediaClauses()` restriction guard as `/stream/<id>` — a hidden row's HLS
+  URLs refuse even with a fully generated, warm cache sitting on disk.
+
 `que://` keeps artwork, subtitles and skin assets — small, no-Range content. It must still be registered before `app.ready` with `stream: true`, or media elements buffer whole responses:
 
 ```js
@@ -609,6 +638,16 @@ Crossover is at pool ≈ 2. **Past that the single main thread binds, not the co
 which is why 28 cores give 3.06×, and why `defaultProbeConcurrency()`'s cap of 8 is harmless
 but nearly irrelevant. The next gain in scan speed comes from doing less per file on the main
 thread (batching probes, or moving stage A to a worker), not from more concurrency.
+
+**Shared with the transcode pool (M1c).** A single video-codec transcode is a multi-threaded
+`libx264` process that claims most of the visible core count on its own — measured running
+unthrottled on 28 cores (PRA-M1c §3 M-3). `src/main/transcode/budget.ts`'s `ConcurrencyBudget`
+is the arbiter: a transcode job reserves cores from it before starting ffmpeg (foreground,
+user-waiting work gets priority) and the probe pool asks the budget for its ceiling every time
+a worker slot frees up, via `Pool.resize()` — new capability on the shared utility, not a
+duplicate one, per the rule above. Copy-only jobs (a plain container remux or audio transcode)
+reserve nothing; the cost `ConcurrencyBudget` guards against is real only for an actual video
+re-encode.
 
 **The key identifies the request, not the row.**
 
@@ -1027,7 +1066,7 @@ The full command reference — every npm script, what it does, and when you'd re
 | **M0** ✅ | Scaffold | electron-vite + TS + React, window, preload bridge, SQLite + migrations, typed IPC contract with Zod validation, provider registry, `que://` protocol, **hiding + age limits (§23)**, ffmpeg fetch + db CLI, lint/typecheck/46 tests |
 | **M1** ✅ | Library & playback | source paths, scan, drag-drop + dialog import, ffprobe, HTTP/Range streaming server, grid + detail, `<video>` playback, resume |
 | **M1b** ✅ | Concurrency & idempotency | bounded pool + rate gate + retry as one shared utility, idempotency keys, single-flight, two-layer response cache (migration 004), per-row transactional apply, pooled ffprobe, IPC round-trip tests |
-| **M1c** | HLS transcode | on-demand remux/transcode for MKV and HEVC, segment cache, player fallback path. **Its pool must be sized against the probe pool, not independently** — transcoding is far heavier than probing and competes for the same cores, so a scan during playback would otherwise starve the player (AAR-M1b §5). |
+| **M1c** ✅ | HLS transcode | Per-stream transcode planner, progressive HLS generation, seek via a fresh job at the target offset, segment cache with fingerprint invalidation and size-capped LRU eviction, shared concurrency budget with the probe pool, `ffmpeg.ts` testable outside Electron, hls.js in the renderer. Verified against a real MKV library end to end, including a real seek (§8). |
 | **M2** | Search & filter | FTS5 index + reindex hooks, global search box with operators, `FilterSpec` builder, facet sidebar, sorting, keyset pagination |
 | **M3** | Metadata & artwork | provider registry + chain, Cinemeta, MusicBrainz/CAA, optional TMDB, auto-match, manual match UI, metadata editor incl. custom fields, custom thumbnails, ratings |
 | **M4** | Subtitles, lyrics & trailers | sidecar + embedded extraction, OpenSubtitles v3, optional Wyzie, SRT → TextTrack, lyrics.ovh panel, trailer window + YouTube fallback |

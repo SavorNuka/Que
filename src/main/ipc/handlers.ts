@@ -21,6 +21,7 @@ import { ffmpegAvailable } from '../ffmpeg';
 import { importPaths, scanSource } from '../library/scanner';
 import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../library/walk';
 import type { MediaServer } from '../server/server';
+import { mediaWorkBudget } from '../transcode/budget';
 
 type Handlers = { [K in IpcChannel]: (...args: IpcMap[K]['args']) => Promise<IpcMap[K]['result']> };
 
@@ -99,6 +100,7 @@ function makeHandlers({ getWindow, server }: HandlerDeps): Handlers {
             return null;
           }
         },
+        budget: mediaWorkBudget,
       });
       emit('library:changed', { reason: 'import' });
       return { imported, skipped };
@@ -126,6 +128,7 @@ function makeHandlers({ getWindow, server }: HandlerDeps): Handlers {
               full,
               isCancelled: () => scanCancelled,
               onProgress: (p) => emit('scan:progress', p),
+              budget: mediaWorkBudget,
             })
           );
         }

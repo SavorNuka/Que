@@ -3,8 +3,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/main/db/connection';
 import * as sourcesRepo from '../src/main/db/repos/sources';
-import { scanSource, titleFromFileName } from '../src/main/library/scanner';
+import { createProbePool, scanSource, titleFromFileName } from '../src/main/library/scanner';
 import type { ProbeResult } from '../src/main/library/probe';
+import { ConcurrencyBudget } from '../src/main/transcode/budget';
 import { cleanup, makeFakeMedia, tempDir } from './helpers/media';
 import { freshDb } from './helpers/db';
 
@@ -244,5 +245,55 @@ describe('scanSource', () => {
     await scan();
     const s = sourcesRepo.getAll(db)[0];
     expect(s?.lastScanAt).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * PRA-M1c §5.4 / §9 item 11g: the probe pool must shrink while a transcode
+ * holds cores from the shared budget, and grow back once it releases them.
+ */
+describe('createProbePool — shared concurrency budget', () => {
+  it('sizes itself against the budget at creation time', () => {
+    const budget = new ConcurrencyBudget(8);
+    budget.reserve(5); // 3 left
+    const { pool, release } = createProbePool({ concurrency: 8, budget });
+    expect(pool.size).toBe(3);
+    release();
+  });
+
+  it('shrinks live when a transcode reserves cores after the pool exists', () => {
+    const budget = new ConcurrencyBudget(8);
+    const { pool, release } = createProbePool({ concurrency: 8, budget });
+    expect(pool.size).toBe(8);
+
+    const releaseTranscode = budget.reserve(5);
+    expect(pool.size).toBe(3);
+
+    releaseTranscode();
+    expect(pool.size).toBe(8);
+    release();
+  });
+
+  it('never shrinks below 1 even if the budget is fully claimed', () => {
+    const budget = new ConcurrencyBudget(4);
+    const { pool, release } = createProbePool({ concurrency: 8, budget });
+    budget.reserve(4);
+    budget.reserve(4);
+    expect(pool.size).toBe(1);
+    release();
+  });
+
+  it('is unaffected by budget changes after release() is called', () => {
+    const budget = new ConcurrencyBudget(8);
+    const { pool, release } = createProbePool({ concurrency: 8, budget });
+    release();
+    budget.reserve(6);
+    expect(pool.size).toBe(8); // stale on purpose — the scan that owned it is done
+  });
+
+  it('behaves exactly as before M1c when no budget is supplied', () => {
+    const { pool, release } = createProbePool({ concurrency: 5 });
+    expect(pool.size).toBe(5);
+    release(); // no-op, no subscription exists
   });
 });

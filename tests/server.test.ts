@@ -1,9 +1,14 @@
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import type { ChildProcess } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/main/db/connection';
 import { MediaServer, parseRange } from '../src/main/server/server';
 import * as restrictions from '../src/main/restrictions';
+import { ConcurrencyBudget } from '../src/main/transcode/budget';
+import { fingerprint, jobDir } from '../src/main/transcode/cache';
+import { TranscodeManager, type SpawnFn } from '../src/main/transcode/manager';
 import { cleanup, tempDir } from './helpers/media';
 import { freshDb } from './helpers/db';
 
@@ -342,5 +347,212 @@ describe('playback progress', () => {
   it('does nothing for an id that does not exist', async () => {
     const { setProgress } = await import('../src/main/db/repos/media');
     expect(() => setProgress(db, 9999, 1000)).not.toThrow();
+  });
+});
+
+/**
+ * PRA-M1c §5.8/§9 item 11b: the HLS routes carry the same token auth and
+ * `mediaClauses()` restriction guard as `/stream/<id>`. A fake spawn writes a
+ * playlist immediately rather than waiting on real ffmpeg — these tests are
+ * about routing and the restriction guard, which `TranscodeManager` and
+ * `plan.ts` already cover against real ffmpeg elsewhere.
+ */
+describe('MediaServer — HLS (M1c)', () => {
+  class FakeProcess extends EventEmitter {
+    kill(): boolean {
+      this.emit('exit', null);
+      return true;
+    }
+  }
+
+  /** Writes a fake but structurally valid HLS output the instant it is "spawned". */
+  const instantSpawn: SpawnFn = (_bin, args) => {
+    const playlistPath = args[args.length - 1] ?? '';
+    const dir = dirname(playlistPath);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      playlistPath,
+      '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:6.0,\nseg00000.ts\n#EXT-X-ENDLIST\n'
+    );
+    writeFileSync(join(dir, 'seg00000.ts'), Buffer.from('fake-ts-bytes'));
+    return new FakeProcess() as unknown as ChildProcess;
+  };
+
+  let db: Db;
+  let dir: string;
+  let cacheRoot: string;
+  let server: MediaServer;
+  let base: string;
+  let token: string;
+
+  const CONTENT = Buffer.from('x'.repeat(1000));
+
+  const addHlsMedia = (opts: {
+    container?: string | null;
+    videoCodec?: string | null;
+    audioCodec?: string | null;
+    hidden?: boolean;
+  }): number => {
+    const path = join(dir, `media-${Math.random().toString(36).slice(2)}.mkv`);
+    writeFileSync(path, CONTENT);
+    const info = db
+      .prepare(
+        `INSERT INTO media (kind, path, file_name, ext, size_bytes, mtime_ms, added_at,
+                            container, video_codec, audio_codec, needs_remux, remux_reason, hidden)
+         VALUES ('video', ?, 'x.mkv', '.mkv', ?, ?, ?, ?, ?, ?, 1, 'container', ?)`
+      )
+      .run(
+        path,
+        CONTENT.length,
+        1_000, // fixed mtime — the tests compute the matching fingerprint from this
+        Date.now(),
+        opts.container ?? 'matroska,webm',
+        opts.videoCodec ?? 'h264',
+        opts.audioCodec ?? 'vorbis',
+        opts.hidden ? 1 : 0
+      );
+    return Number(info.lastInsertRowid);
+  };
+
+  beforeEach(async () => {
+    db = freshDb();
+    dir = tempDir('que-server-hls-');
+    cacheRoot = tempDir('que-server-hls-cache-');
+    restrictions.configure(
+      { enabled: false, maxAge: 18, allowUnrated: true, blockExplicit: false, pinSet: false, unlockMinutes: 30 },
+      null
+    );
+    const manager = new TranscodeManager({ cacheRoot, budget: new ConcurrencyBudget(4), spawn: instantSpawn });
+    server = new MediaServer(() => db, { manager, cacheRoot });
+    const status = await server.start(0);
+    base = `http://127.0.0.1:${status.port}`;
+    token = status.token!;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+    db.close();
+    cleanup(dir);
+    cleanup(cacheRoot);
+  });
+
+  /**
+   * Found only by actually launching the app and letting hls.js resolve the
+   * URL client-side (PRA-M1c's own warning about this milestone, proven
+   * true): a path-only `hlsUrl` resolves against the renderer's `file://`
+   * page origin, not the media server's `http://127.0.0.1:<port>` origin,
+   * and produces a silently broken `file:///hls/...` request. `/stream/<id>`
+   * already gets this right via `urlFor()`; `hlsUrl` must match it.
+   */
+  it('points /stream\'s 415 body at an absolute hlsUrl, not a page-relative path', async () => {
+    const id = addHlsMedia({});
+    const res = await fetch(`${base}/stream/${id}?t=${token}`);
+    expect(res.status).toBe(415);
+    const body = (await res.json()) as { hlsUrl: string };
+    expect(body.hlsUrl).toBe(`${base}/hls/${id}/playlist.m3u8?t=${token}`);
+  });
+
+  it('serves a growing playlist for a file that needs a container remux', async () => {
+    const id = addHlsMedia({});
+    const res = await fetch(`${base}/hls/${id}/playlist.m3u8?t=${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('mpegurl');
+    const body = await res.text();
+    expect(body).toContain('#EXTM3U');
+    expect(body).toContain('seg00000.ts');
+  });
+
+  it('serves the segment the playlist references', async () => {
+    const id = addHlsMedia({});
+    await fetch(`${base}/hls/${id}/playlist.m3u8?t=${token}`); // starts the job
+    const res = await fetch(`${base}/hls/${id}/seg00000.ts?t=${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('video/mp2t');
+    expect(await res.text()).toBe('fake-ts-bytes');
+  });
+
+  it('redirects to /stream when the file plays directly and needs no HLS work at all', async () => {
+    const id = addHlsMedia({ container: 'mov,mp4,m4a,3gp,3g2,mj2', videoCodec: 'h264', audioCodec: 'aac' });
+    const res = await fetch(`${base}/hls/${id}/playlist.m3u8?t=${token}`, { redirect: 'manual' });
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toContain(`/stream/${id}`);
+  });
+
+  it('refuses an HLS request with no token, same as /stream', async () => {
+    const id = addHlsMedia({});
+    expect((await fetch(`${base}/hls/${id}/playlist.m3u8`)).status).toBe(401);
+  });
+
+  it('rejects a segment name that is not ffmpeg\'s own pattern', async () => {
+    const id = addHlsMedia({});
+    await fetch(`${base}/hls/${id}/playlist.m3u8?t=${token}`);
+    const res = await fetch(`${base}/hls/${id}/..%2F..%2Fetc%2Fpasswd?t=${token}`);
+    expect(res.status).toBe(400);
+  });
+
+  it('404s a segment for a job that was never started', async () => {
+    const id = addHlsMedia({});
+    const res = await fetch(`${base}/hls/${id}/seg00000.ts?t=${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  /**
+   * R4 — the invariant PRA-M1b §6/§23 established and PRA-M1c §5.8 carries
+   * forward: restrictions are enforced in the query layer, never against
+   * cached bytes. A warm, already-generated cache must not become a way
+   * around it. The cache here is pre-populated directly on disk — the point
+   * is that even a *fully generated* job refuses, not just a not-yet-started
+   * one.
+   */
+  it('refuses a hidden row\'s playlist and segments even with a fully warm cache', async () => {
+    const id = addHlsMedia({ hidden: true });
+
+    // Warm the cache exactly as a real job would have left it.
+    const fp = fingerprint(CONTENT.length, 1_000);
+    const dir2 = jobDir(cacheRoot, id, fp, 0);
+    mkdirSync(dir2, { recursive: true });
+    writeFileSync(join(dir2, 'playlist.m3u8'), '#EXTM3U\n#EXTINF:6.0,\nseg00000.ts\n#EXT-X-ENDLIST\n');
+    writeFileSync(join(dir2, 'seg00000.ts'), Buffer.from('warm-bytes'));
+
+    restrictions.configure(
+      { enabled: true, maxAge: 18, allowUnrated: true, blockExplicit: false, pinSet: false, unlockMinutes: 30 },
+      null
+    );
+
+    expect((await fetch(`${base}/hls/${id}/playlist.m3u8?t=${token}`)).status).toBe(404);
+    expect((await fetch(`${base}/hls/${id}/seg00000.ts?t=${token}`)).status).toBe(404);
+  });
+
+  it('a seek job lives at its own URL and does not collide with the from-start job', async () => {
+    const id = addHlsMedia({});
+    await fetch(`${base}/hls/${id}/playlist.m3u8?t=${token}`);
+    const seek = await fetch(`${base}/hls/${id}/seek/120/playlist.m3u8?t=${token}`);
+    expect(seek.status).toBe(200);
+
+    const seg = await fetch(`${base}/hls/${id}/seek/120/seg00000.ts?t=${token}`);
+    expect(seg.status).toBe(200);
+  });
+
+  it('sweeps a stale-fingerprint cache directory when a rescan changed the file (§9 item 11f)', async () => {
+    const id = addHlsMedia({});
+
+    const staleFp = fingerprint(CONTENT.length - 1, 999); // deliberately not the row's current fingerprint
+    const staleDir = jobDir(cacheRoot, id, staleFp, 0);
+    mkdirSync(staleDir, { recursive: true });
+    writeFileSync(join(staleDir, 'playlist.m3u8'), '#EXTM3U\n#EXT-X-ENDLIST\n');
+
+    await fetch(`${base}/hls/${id}/playlist.m3u8?t=${token}`);
+
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(staleDir)).toBe(false);
+  });
+
+  it('503s with no transcode pipeline configured, rather than 404ing confusingly', async () => {
+    const plainServer = new MediaServer(() => db);
+    const status = await plainServer.start(0);
+    const id = addHlsMedia({});
+    const res = await fetch(`http://127.0.0.1:${status.port}/hls/${id}/playlist.m3u8?t=${status.token}`);
+    expect(res.status).toBe(503);
+    await plainServer.stop();
   });
 });

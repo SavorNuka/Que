@@ -1,13 +1,27 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, session, shell } from 'electron';
 import { openDatabase, setDatabase, closeDatabase, getDatabase } from './db/connection';
+import { setFfmpegSearchRoots } from './ffmpeg';
 import { registerIpcHandlers, setDbPathForInfo } from './ipc/handlers';
 import { registerQueProtocol, registerQueScheme } from './protocol/que';
 import { MediaServer } from './server/server';
 import { load as loadSettings } from './settings';
+import { mediaWorkBudget } from './transcode/budget';
+import { DEFAULT_CACHE_CAP_BYTES, enforceSizeCap } from './transcode/cache';
+import { TranscodeManager } from './transcode/manager';
 
 // Must run before app is ready — see ASSUMPTIONS.md A3.
 registerQueScheme();
+
+// The only place that knows about Electron's app-path resolution (ffmpeg.ts
+// itself no longer imports `electron` — PRA-M1c §5.9). Order matches the
+// pre-M1c candidate list: packaged resourcesPath, then the dev app path,
+// then cwd as a last resort.
+setFfmpegSearchRoots([
+  join(process.resourcesPath ?? '', 'bin'),
+  join(app.getAppPath(), 'resources', 'bin'),
+  join(process.cwd(), 'resources', 'bin'),
+]);
 
 let mainWindow: BrowserWindow | null = null;
 const isDev = !app.isPackaged;
@@ -16,8 +30,15 @@ const isDev = !app.isPackaged;
  * Playback is served over HTTP on loopback rather than a custom protocol
  * (ASSUMPTIONS.md A2), so the app window and, later, other devices on the
  * network share one streaming path with real Range support.
+ *
+ * The transcode manager and media server both need `userData`, which is
+ * resolved inside `whenReady` below (matching the existing `dbPath`
+ * resolution) rather than at module scope.
  */
-const mediaServer = new MediaServer(() => getDatabase());
+let mediaServer: MediaServer;
+let transcodeManager: TranscodeManager;
+let killIdleTimer: NodeJS.Timeout | undefined;
+let cacheSweepTimer: NodeJS.Timeout | undefined;
 
 /**
  * Renderer CSP.
@@ -205,6 +226,20 @@ app.whenReady().then(() => {
   setDatabase(openDatabase(dbPath));
   loadSettings();
 
+  const cacheRoot = join(app.getPath('userData'), 'transcode');
+  transcodeManager = new TranscodeManager({ cacheRoot, budget: mediaWorkBudget });
+  mediaServer = new MediaServer(() => getDatabase(), { manager: transcodeManager, cacheRoot });
+
+  // Nobody watching an idle transcode for a while means stop burning CPU on
+  // it (§5.6); the cache size cap is enforced on the same cadence rather
+  // than after every job, which would mean a readdir-and-stat sweep per
+  // segment request.
+  killIdleTimer = setInterval(() => transcodeManager.killIdle(), 30_000);
+  cacheSweepTimer = setInterval(
+    () => enforceSizeCap(cacheRoot, DEFAULT_CACHE_CAP_BYTES, transcodeManager.activeDirs()),
+    5 * 60_000
+  );
+
   applySecurityHeaders();
   registerQueProtocol();
   registerIpcHandlers({ getWindow: () => mainWindow, server: mediaServer });
@@ -235,6 +270,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  clearInterval(killIdleTimer);
+  clearInterval(cacheSweepTimer);
+  transcodeManager?.killAll();
   void mediaServer.stop();
   closeDatabase();
 });

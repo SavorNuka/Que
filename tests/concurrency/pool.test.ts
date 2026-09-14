@@ -346,3 +346,85 @@ describe('Pool — drain', () => {
     expect(settle.mock.calls[0]?.[0]).toMatchObject({ ok: false });
   });
 });
+
+/**
+ * PRA-M1c §5.4: the probe pool must shrink while a transcode holds cores from
+ * the shared budget, and grow back once it releases them — which requires
+ * resizing a pool that is already running, not just at construction.
+ */
+describe('Pool — resize', () => {
+  it('growing admits queued work immediately, without waiting for a slot to free up', async () => {
+    // 'a' is unblocked manually rather than by a wall-clock delay — a fixed
+    // sleep here raced under `vitest --repeats=20` load and flaked (the
+    // repeat gate's whole purpose per PROCESS.md §4: a suite that passed
+    // once had not been shown to pass).
+    let resolveA = (): void => undefined;
+    const aBlocked = new Promise<void>((r) => (resolveA = r));
+    const started: string[] = [];
+
+    const pool = new Pool({ size: 1, queueLimit: 10 });
+    const settle = (): void => undefined;
+
+    void pool.submit(async () => {
+      started.push('a');
+      await aBlocked;
+    }, settle);
+    void pool.submit(async () => started.push('b'), settle);
+    void pool.submit(async () => started.push('c'), settle);
+
+    // submit() runs its admission synchronously (PoolOptions has no queue
+    // limit hit here), so by the time these calls return, 'a' has already
+    // started and 'b'/'c' are queued behind it — no await needed to observe it.
+    expect(pool.active).toBe(1);
+    expect(started).toEqual(['a']);
+
+    pool.resize(3);
+    // resize() calls #pump() synchronously too: 'b' and 'c' are admitted and
+    // run to their own first (and only) await point before resize() returns.
+    expect(pool.active).toBe(3);
+    expect(started).toEqual(['a', 'b', 'c']);
+
+    resolveA();
+    await pool.drain();
+  });
+
+  it('shrinking does not stop already-running tasks, only future admissions', async () => {
+    const t = tracker();
+    const pool = new Pool({ size: 3, queueLimit: 10 });
+
+    const results: Settled<string>[] = [];
+    const settle = (s: Settled<string>): void => void results.push(s);
+    void pool.submit(t.task('a', 30), settle);
+    void pool.submit(t.task('b', 30), settle);
+    void pool.submit(t.task('c', 30), settle);
+    void pool.submit(t.task('d', 30), settle);
+
+    // Admission at construction-time size is synchronous (same reasoning as
+    // the growing test above) — no sleep needed, and no race to have one.
+    expect(pool.active).toBe(3);
+
+    pool.resize(1); // shrink while a, b, c are already running
+    expect(pool.active).toBe(3); // still running — resize does not cancel them
+
+    await pool.drain();
+    expect(results.filter((r) => r.ok)).toHaveLength(4);
+    // d only started once a slot freed AND the new size (1) allowed it —
+    // i.e. only after two of a/b/c had already finished.
+    const dStart = t.order.indexOf('start:d');
+    const finishesBeforeD = t.order.slice(0, dStart).filter((e) => e.startsWith('end:')).length;
+    expect(finishesBeforeD).toBeGreaterThanOrEqual(2);
+  });
+
+  it('rejects a non-positive-integer size, same validation as construction', () => {
+    const pool = new Pool({ size: 2 });
+    expect(() => pool.resize(0)).toThrow(/positive integer/);
+    expect(() => pool.resize(1.5)).toThrow(/positive integer/);
+  });
+
+  it('exposes the current size via the public getter', () => {
+    const pool = new Pool({ size: 2 });
+    expect(pool.size).toBe(2);
+    pool.resize(5);
+    expect(pool.size).toBe(5);
+  });
+});
