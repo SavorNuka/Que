@@ -52,33 +52,93 @@ function fail(msg) {
   process.exit(softFail ? 0 : 1);
 }
 
+const MB = 1024 * 1024;
+
 async function download(url, dest) {
   console.log(`  downloading ${url}`);
+
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${url}`);
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(dest));
+
+  const total = Number(res.headers.get('content-length') ?? 0);
+  if (total) console.log(`  ${(total / MB).toFixed(1)} MB`);
+
+  /**
+   * Plain lines every 10 MB — deliberately not a progress bar. Carriage
+   * returns and cursor moves are exactly what this script used to push into
+   * the terminal, so progress here is append-only and safe to pipe to a file.
+   */
+  let seen = 0;
+  let nextMark = 10 * MB;
+  const body = Readable.fromWeb(res.body);
+  body.on('data', (chunk) => {
+    seen += chunk.length;
+    if (seen >= nextMark) {
+      const pct = total ? ` (${Math.round((seen / total) * 100)}%)` : '';
+      console.log(`  ${(seen / MB).toFixed(0)} MB${pct}`);
+      nextMark += 10 * MB;
+    }
+  });
+
+  await pipeline(body, createWriteStream(dest));
+  console.log(`  downloaded ${(seen / MB).toFixed(1)} MB`);
+}
+
+/**
+ * Run a command, capturing its output rather than inheriting the console.
+ *
+ * `stdio: 'inherit'` was the original here and is what made this step hostile.
+ * An extractor that renders a progress bar writes console-control sequences
+ * straight into the parent terminal; PowerShell's `Expand-Archive` in
+ * particular redraws `Write-Progress` per entry, which on an archive of a few
+ * thousand files is both pathologically slow and capable of wedging or killing
+ * the terminal it is drawing into. Captured output costs nothing and is shown
+ * only if the command actually fails.
+ */
+function run(cmd, cmdArgs) {
+  return execFileSync(cmd, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
 }
 
 /** Extract with whatever the platform already has — no npm archive dependency. */
 function extract(archive, into, kind) {
   mkdirSync(into, { recursive: true });
-  if (kind === 'zip') {
-    if (process.platform === 'win32') {
-      execFileSync(
-        'powershell',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
+
+  if (kind !== 'zip') {
+    run('tar', ['-xf', archive, '-C', into]);
+    return;
+  }
+
+  if (process.platform !== 'win32') {
+    run('unzip', ['-q', '-o', archive, '-d', into]);
+    return;
+  }
+
+  // Windows 10 1803+ ships bsdtar as tar.exe, which reads zip and is an order
+  // of magnitude faster than Expand-Archive with none of the console drawing.
+  try {
+    run('tar', ['-xf', archive, '-C', into]);
+    return;
+  } catch (tarErr) {
+    console.log('  tar unavailable, falling back to Expand-Archive…');
+
+    // $ProgressPreference silences Write-Progress. This is not cosmetic: with
+    // progress enabled Expand-Archive is famously 10-100x slower, and it is the
+    // rendering that destabilises the console.
+    try {
+      run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$ProgressPreference = 'SilentlyContinue'; ` +
           `Expand-Archive -LiteralPath "${archive}" -DestinationPath "${into}" -Force`,
-        ],
-        { stdio: 'inherit' }
-      );
-    } else {
-      execFileSync('unzip', ['-q', '-o', archive, '-d', into], { stdio: 'inherit' });
+      ]);
+    } catch (psErr) {
+      const detail = [tarErr, psErr]
+        .map((e) => (e?.stderr ? String(e.stderr).trim() : e?.message))
+        .filter(Boolean)
+        .join(' | ');
+      throw new Error(`Could not extract ${archive}: ${detail}`);
     }
-  } else {
-    execFileSync('tar', ['-xf', archive, '-C', into], { stdio: 'inherit' });
   }
 }
 

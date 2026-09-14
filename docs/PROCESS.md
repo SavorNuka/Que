@@ -62,11 +62,16 @@ name the compensating control.
 **Falsification.** What evidence, discovered mid-phase, would mean the design is wrong and the
 phase should stop. Written in advance, while it is still cheap to be honest.
 
-> This section is load-bearing, not ceremony. M1b's fired: the pool returned 1.98× against a
-> predicted 8×, the exit test failed on its own threshold, and the investigation found that
-> ffprobe is CPU-bound rather than I/O-bound — a correction to a number two milestones had
-> been reasoning from. Without the criterion on paper the likely outcome was adjusting the
-> threshold and moving on.
+> This section is load-bearing, not ceremony. M1b's fired twice, and both firings were useful.
+> The pool returned 1.98× against a predicted 8×; the first investigation concluded "CPU-bound,
+> ceiling is the core count", which a 28-core machine then falsified in turn. The eventual
+> answer — a scan is bound by the single JS main thread past a pool of ~2 — corrected a number
+> two milestones had been reasoning from. Without the criterion on paper, the likely outcome
+> each time was adjusting the threshold and moving on.
+>
+> The sharper lesson is in the second firing: **a conclusion drawn from one machine is a
+> hypothesis, not a finding.** A 2-core box cannot distinguish "CPU-bound" from any other
+> bottleneck, because every candidate predicts about 2× there.
 
 ### 2. Initial downstream consideration review
 
@@ -109,11 +114,33 @@ Build what is frozen. Nothing else.
 
 **Gates before the phase can close:** typecheck clean · lint clean · full test suite ·
 concurrency suites under `--repeats=20` (`npm run check` runs all four) · plus any
-phase-specific exit criterion named in the scope doc.
+phase-specific exit criterion named in the scope doc. CI (`.github/workflows/check.yml`) runs
+the same four on every push, plus a Windows bundle and the boot smoke test.
+
+**The tree you gate must be the tree that ships.** A gate run against a partial checkout
+proves nothing about the repository. This is not hypothetical: M1b's lint passed locally and
+failed in CI on its first run, because the container copy had been assembled from source files
+and was missing `docs/sanity-tests/` entirely — four files `eslint .` had therefore never
+seen. Before running gates, verify the working tree matches the repository:
+
+```bash
+diff -rq --exclude=node_modules --exclude=out --exclude=dist \
+         --exclude=.git --exclude=package-lock.json <repo> <working copy>
+```
+
+Anything reported as *"Only in \<repo\>"* is a file the gates are not covering.
 
 Every guard ships with a verified control. A test that has never been seen to fail proves
 nothing — this applies to the process too: the `--repeats` harness was only trusted after a
 deliberately flaky test was shown to pass a single run and fail under repetition.
+
+The same test applies to **silencing** a gate. Excluding a file from lint, skipping a test,
+loosening a threshold — each is sometimes correct and each is the easiest possible way to get
+green. The question to answer in the commit, in writing: *would this gate ever have prevented
+a defect that reaches a user?* `docs/sanity-tests/**` is excluded from lint because those files
+are frozen records nothing imports, run directly, whose output is itself the check — and the
+exclusion was verified not to be a blanket by confirming lint still errors on a planted
+violation under `src/`. A failure under `src/` or `tests/` is never resolved this way.
 
 ### 5. After-action review
 
@@ -141,6 +168,10 @@ Two obligations, because this is the step most likely to evaporate into a list n
 - **A finding that changes a later milestone is written into that milestone**, not only into
   the AAR — into `ARCHITECTURE §22`, or carried explicitly into the next PRA's Inputs. An
   action that exists only in a closed AAR will not be found when it matters.
+- **`OPEN-ACTIONS.md` is reconciled.** New actions added, closed ones struck through with how
+  they were closed. AARs are frozen, so an action raised in M1 and closed in M3 leaves no trace
+  in the document that raised it, and the next PRA gathers items from *the previous* AAR only —
+  which loses anything deferred twice. That table is the index; the AARs stay the account.
 - **Living docs are reconciled to as-built here.** The `status: building` markers from step 3
   come off, measurements and deviations go in, and the staleness checklist below is walked.
 
@@ -157,13 +188,78 @@ sized against what is actually left rather than started and abandoned halfway.
 
 ---
 
+## Working in the cloud workspace
+
+Implementation happens in an ephemeral Linux container, not on the Windows machine. There are
+two filesystems in play and they perform about three orders of magnitude apart.
+
+**The rule: `node_modules` never lives on the attached folder.** `node_modules` is 16,343 files
+across 357 packages. On the attached mount every one of those is a network round trip; on the
+container's local disk it is a local write. Measured, same tree, same command:
+
+| | Attached mount | Local disk |
+|---|---|---|
+| `npm install` | **>70 min, killed unfinished** | **9 s** |
+
+That single mistake cost more than the entire rest of the M1b build. It is not a subtle
+performance question — it is the difference between a workable pass and an unworkable one.
+
+### The recipe
+
+```bash
+# 1. Copy the repo to local disk, excluding node_modules.
+tar cf - --exclude=node_modules . | (cd ~/que && tar xf -)
+
+# 2. Install. 9 s cold, and it is all that is needed.
+cd ~/que && npm ci --ignore-scripts --no-audit --no-fund
+
+# 3. Gates. 23 s.
+npx tsc --noEmit -p tsconfig.node.json && npx tsc --noEmit -p tsconfig.web.json \
+  && npx eslint . && npx vitest run
+```
+
+Thirty-two seconds from nothing to a verified tree. Three things about it are deliberate:
+
+- **`npm ci`, not `npm install`.** `ci` is deterministic and, more importantly, **never rewrites
+  the lockfile**. `npm install` on Linux regenerates `package-lock.json`, and committing that
+  back over the Windows-resolved one is a trap worth avoiding entirely. `package-lock.json` is
+  never committed back from the container.
+- **`--ignore-scripts`.** Skips the ~100 MB Electron binary download and the ffmpeg fetch,
+  neither of which a typecheck/lint/test run needs. The app is never launched here.
+- **No `npm rebuild better-sqlite3`.** Verified unnecessary: better-sqlite3 13 ships its
+  prebuilt binary inside the npm package, so it works straight after `npm ci --ignore-scripts`.
+  Running `rebuild` anyway wastes a minute and prints an alarming gyp failure that is not a
+  failure at all.
+
+### Syncing back
+
+Derive the file list mechanically, never from memory:
+
+```bash
+diff -rq --exclude=node_modules --exclude=out --exclude=dist \
+         --exclude=.git --exclude=package-lock.json ~/que <attached>/que
+```
+
+Hand-listing files to copy back is how one gets missed, and a missed file is a phase that
+typechecks in the container and fails on the machine.
+
+### Don't install when nothing needs installing
+
+Only step 4 needs a working tree. Steps 1–3 and 5–8 — assessment, freeze, doc stub, review,
+report — are reading and writing. A dependency-free harness (`docs/sanity-tests/`) is
+deliberately dependency-free so that step 1 never waits on an install. When a pass does need
+one, start it in the background at the beginning of step 1; by step 4 it has been ready for
+half an hour.
+
+---
+
 ## Living documents, and keeping them honest
 
 Two kinds of document, and conflating them is how both become useless.
 
 | | Living | Point-in-time |
 |---|---|---|
-| Files | `README.md`, `ARCHITECTURE.md`, `ASSUMPTIONS.md`, `PROCESS.md` | `PRA-*.md`, `*-SCOPE.md`, `AAR-*.md` |
+| Files | `README.md`, `ARCHITECTURE.md`, `ASSUMPTIONS.md`, `PROCESS.md`, `OPEN-ACTIONS.md`, `HANDOFF.md` | `PRA-*.md`, `*-SCOPE.md`, `AAR-*.md`, `sanity-tests/*` |
 | Describes | Que as it is now | what was known, or decided, at one moment |
 | Edited | every milestone | **never** — a record that gets tidied is not a record |
 
@@ -181,6 +277,7 @@ the correction is recorded where it belongs: in the AAR that found it, and in
 | | **Documentation index** — new docs listed, under the right heading. |
 | `ARCHITECTURE.md` | The section this phase touched, reconciled to as-built. **§22 milestone table** — ticks, splits, reordering. Any rule the phase established that future code must follow. |
 | `ASSUMPTIONS.md` | **§H** — anything the phase overturned, with what changed as a result. New harnesses added to the test-artifacts table. |
+| `OPEN-ACTIONS.md` | **Every phase.** New actions in, closed ones struck through with how. This is the one that silently rots if skipped, because nothing else references it. |
 | `PROCESS.md` | Only when the process itself changed. A standing rule earned by a defect goes in the table below. |
 
 ---

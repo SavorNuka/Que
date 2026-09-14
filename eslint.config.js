@@ -3,7 +3,34 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['out/**', 'dist/**', 'node_modules/**', 'resources/**'] },
+  {
+    ignores: [
+      'out/**',
+      'dist/**',
+      'node_modules/**',
+      'resources/**',
+      /**
+       * The sanity-test harnesses (docs/ASSUMPTIONS.md "Test artifacts").
+       *
+       * Excluded on principle, not to get a green build. These are
+       * point-in-time records: docs/PROCESS.md commits to never editing them,
+       * because their value is being an honest account of what was run and
+       * what it returned. Linting a file you have undertaken not to change
+       * can only produce pressure to change it.
+       *
+       * They are also nothing like application code — CommonJS and ESM side by
+       * side, and skin-sandbox2.js is half Node and half Chromium page, so any
+       * globals list that satisfied it would be a lie told to every other file.
+       * Nothing imports them; they are run directly and their output IS the
+       * check, so a broken harness announces itself on the first run.
+       *
+       * The test for a legitimate exclusion: would linting this ever prevent a
+       * defect that reaches a user? Here, no. A lint failure under src/ or
+       * tests/ is never resolved this way.
+       */
+      'docs/sanity-tests/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

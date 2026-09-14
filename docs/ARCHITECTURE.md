@@ -2,7 +2,8 @@
 
 **Que** — a local personal media library and video/music player for Windows.
 
-Status: **M0 built and verified** (typecheck, lint, 46 tests green). Repo: `D:\Projects\Que`.
+Status: **M0, M1 and M1b built and verified** — typecheck clean, lint clean, 351 tests, 153 of
+them re-run 20×. Next is M1c. Repo: `D:\Projects\Que`.
 Corrections from [ASSUMPTIONS.md](ASSUMPTIONS.md) are folded in below.
 Last updated: 2026-09-13.
 
@@ -589,7 +590,25 @@ Built in M1b, before any provider exists, because every provider depends on it. 
 | Local work (ffprobe-like) | 487 ms | **61 ms** |
 | Rate-limited (MusicBrainz-like) | 595 ms | **602 ms** |
 
-A worker pool is an 8× win on local work and worth nothing against a rate limiter — worse than nothing, because eight workers turn a polite queue into a burst. So **pool size is never a rate control**: local work gets `Pool`, remote work gets deduplication plus `RateGate`.
+A worker pool is a large win on local work and worth nothing against a rate limiter — worse than nothing, because eight workers turn a polite queue into a burst. So **pool size is never a rate control**: local work gets `Pool`, remote work gets deduplication plus `RateGate`.
+
+How large a win depends on the machine, and not in the way first assumed. Measured against
+real ffprobe on real media (AAR-M1b §3, revised after a 28-core run):
+
+| Pool | 1 | 2 | 4 | 8 | 16 | stub probe |
+|---|---|---|---|---|---|---|
+| ms/file, 28 cores | 46.72 | 16.60 | 16.15 | 15.42 | 15.25 | 6.15 |
+
+A scan is a **two-stage pipeline**: per file the JS main thread pays stage A (walk,
+quick-hash, insert, reindex) plus the parent-side cost of each probe — spawning the process,
+reading its pipe, parsing its JSON — while only the subprocess time overlaps across the pool.
+`total(N≥2) ≈ files × max(m, p/N)` fits the measurements within 5.6%, with m = 15.25 ms/file
+and p = 31.47 ms/file.
+
+Crossover is at pool ≈ 2. **Past that the single main thread binds, not the core count** —
+which is why 28 cores give 3.06×, and why `defaultProbeConcurrency()`'s cap of 8 is harmless
+but nearly irrelevant. The next gain in scan speed comes from doing less per file on the main
+thread (batching probes, or moving stage A to a worker), not from more concurrency.
 
 **The key identifies the request, not the row.**
 
@@ -1007,8 +1026,8 @@ The full command reference — every npm script, what it does, and when you'd re
 |---|---|---|
 | **M0** ✅ | Scaffold | electron-vite + TS + React, window, preload bridge, SQLite + migrations, typed IPC contract with Zod validation, provider registry, `que://` protocol, **hiding + age limits (§23)**, ffmpeg fetch + db CLI, lint/typecheck/46 tests |
 | **M1** ✅ | Library & playback | source paths, scan, drag-drop + dialog import, ffprobe, HTTP/Range streaming server, grid + detail, `<video>` playback, resume |
-| **M1b** | Concurrency & idempotency | bounded pool + rate gate + retry as one shared utility, idempotency keys, single-flight, two-layer response cache, per-row transactional apply, pooled ffprobe, IPC round-trip tests |
-| **M1c** | HLS transcode | on-demand remux/transcode for MKV and HEVC, segment cache, player fallback path |
+| **M1b** ✅ | Concurrency & idempotency | bounded pool + rate gate + retry as one shared utility, idempotency keys, single-flight, two-layer response cache (migration 004), per-row transactional apply, pooled ffprobe, IPC round-trip tests |
+| **M1c** | HLS transcode | on-demand remux/transcode for MKV and HEVC, segment cache, player fallback path. **Its pool must be sized against the probe pool, not independently** — transcoding is far heavier than probing and competes for the same cores, so a scan during playback would otherwise starve the player (AAR-M1b §5). |
 | **M2** | Search & filter | FTS5 index + reindex hooks, global search box with operators, `FilterSpec` builder, facet sidebar, sorting, keyset pagination |
 | **M3** | Metadata & artwork | provider registry + chain, Cinemeta, MusicBrainz/CAA, optional TMDB, auto-match, manual match UI, metadata editor incl. custom fields, custom thumbnails, ratings |
 | **M4** | Subtitles, lyrics & trailers | sidecar + embedded extraction, OpenSubtitles v3, optional Wyzie, SRT → TextTrack, lyrics.ovh panel, trailer window + YouTube fallback |

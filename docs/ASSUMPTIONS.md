@@ -14,8 +14,9 @@ Test scripts are reproducible; method is stated per row.
 The two wrong ones both sit in the playback path and change the design. Nothing
 found invalidates the overall architecture.
 
-**Since implementation began: 3 overturned** (§H), one of which changed a measurement we had
-been reasoning from for two milestones.
+**Since implementation began: 3 overturned** (§H). One of them — H1 — has now been wrong
+*twice*, in opposite directions, and is the clearest evidence in this project that a single
+machine is not a measurement.
 
 ---
 
@@ -254,36 +255,64 @@ Items 5 and 6 are the only structural ones, and they make the system smaller. Ev
 Assumptions that passed the pre-implementation check — or were never questioned, which is
 worse — and were falsified by a running system. Each names the milestone that found it.
 
-### H1. ⛔ WRONG — ffprobe is I/O-bound, so a deep pool will parallelise it freely
+### H1. ⛔ WRONG, TWICE — first "ffprobe is I/O-bound", then "ffprobe is CPU-bound"
 
-*Held through M1 and M1b's planning. Overturned by M1b's benchmark ([AAR-M1b](AAR-M1b.md) §3).*
+*Held through M1 and all of M1b. Both readings overturned by running the benchmark on a second
+machine — 28 cores, Windows — after M1b had closed.*
 
-AAR-M1 D3 measured a cold scan as "98% ffprobe wait" and everyone, including the PRA built on
-top of it, read *wait* as *I/O wait*. It is not. Measured across pool sizes on a 2-core
-machine:
+The claim has now been wrong in two opposite directions, and the reason both survived is the
+same: each was inferred from a single machine that could not distinguish them.
+
+**First version.** AAR-M1 D3 measured a cold scan as "98% ffprobe wait", and everything built
+on top read *wait* as *I/O wait* — so a deep pool should parallelise it freely.
+
+**Second version.** M1b's benchmark on a 2-core box showed speed-up saturating at exactly 2×
+and never moving at pool 4, 8 or 16. That looked like proof of a CPU ceiling. It was not
+proof of anything: on 2 cores, *every* candidate bottleneck predicts "about 2×", so the
+measurement had no power to discriminate.
+
+**What the 28-core run actually shows.** A scan is a two-stage pipeline, and the stages
+overlap — the walk feeds the pool while the pool works:
 
 ```
-  pool 1   52.17 ms/file   1.00×
-  pool 2   26.57 ms/file   1.96×
-  pool 4   26.34 ms/file   1.98×
-  pool 8   26.58 ms/file   1.96×
-  pool 16  26.98 ms/file   1.93×
+  pool    total       per file    speed-up   model
+  1       11213 ms    46.72 ms    1.00×      11213 ms
+  2        3983 ms    16.60 ms    2.82×       3777 ms
+  4        3875 ms    16.15 ms    2.89×       3659 ms
+  8        3701 ms    15.42 ms    3.03×       3659 ms
+  16       3659 ms    15.25 ms    3.06×       3659 ms
+  stub     1477 ms     6.15 ms      —
 ```
 
-Speed-up saturates at exactly the core count and never moves again. ffprobe is a subprocess
-decoding container headers on a CPU, not a request waiting on a platter. The 98% figure was
-right about where wall-clock goes and wrong about why.
+`total(N≥2) ≈ files × max(m, p/N)` fits within 5.6%, and exactly at pool 16, where
 
-**What changed.** Not the design — a pool is still correct and still delivers everything the
-hardware allows. What changed is the ceiling: `defaultProbeConcurrency()` tracks
-`availableParallelism()` capped at 8, and the cap is justified by "past the core count there
-is nothing to gain" rather than by a guess about disk depth. The exit-criterion assertion was
-rewritten from a flat `> 2×` to a fraction of `min(cores, maxPool)`, because a flat threshold
-fails a 2-core machine achieving 100% of what it has.
+- **m = 15.25 ms/file** on the JS main thread — stage A (walk, quick-hash, insert, reindex) at
+  6.15, plus **9.10 ms of parent-side probe cost**: spawning the process, reading its pipe,
+  parsing its JSON. Process creation is far more expensive on Windows than the `fork` this was
+  reasoned about on.
+- **p = 31.47 ms/file** inside the ffprobe subprocess — the only part the pool overlaps.
 
-**Still open:** the projection for a 20,000-file library on real hardware. On 2 cores it is
-8.8 min; at 8 cores the arithmetic says ~2.2 min. Arithmetic, not a measurement — `npm run
-bench` on the Windows machine settles it.
+Crossover is at pool ≈ 2.1. **Past two workers the binding constraint is the single JS main
+thread**, which is why 28 cores deliver 3.06× and not 28×. Not I/O, not CPU: our own
+per-file serial work, most of it the cost of *starting* probes rather than running them.
+
+The Amdahl model (stub run as the serial fraction) was also tried and is measurably wrong —
+it predicts 1.77× at pool 2 where 2.82× was observed, which no real ceiling can do. Stage A
+does not precede the probes; it runs alongside them.
+
+**What changed.** Not the design — 3.06× is real, and it takes a 20,000-file cold scan from
+15.6 min to 5.1 min. What changed is where the next gain comes from: **less main-thread work
+per file, not more workers.** `defaultProbeConcurrency()`'s cap of 8 is harmless but nearly
+irrelevant; pool 4 is within 6% of pool 16.
+
+Deliberately **not** scheduled as work: the saving is ~2.5 minutes on a one-time scan, against
+a worker-thread or batched-ffprobe refactor in the subsystem that has already produced two
+silent data-loss bugs. Recorded under *Accepted, not scheduled* in
+[OPEN-ACTIONS.md](OPEN-ACTIONS.md) with the levers, so a future decision starts from evidence.
+
+**Method note, which is the real lesson.** A performance threshold was asserted in the
+benchmark twice and was wrong both times, each time generalised from one machine. A benchmark
+now reports and models; it no longer judges.
 
 ### H2. ⛔ WRONG — `http_cache` (migration 001) can serve as the provider response cache
 

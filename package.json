@@ -43,7 +43,7 @@
     "db:vacuum": "node scripts/db-cli.mjs vacuum",
     "db:stats": "node scripts/db-cli.mjs stats",
     "test:concurrency": "vitest run tests/concurrency tests/idempotency --repeats=20",
-    "bench": "QUE_BENCH=1 vitest run tests/bench"
+    "bench": "node scripts/bench.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

@@ -28,6 +28,12 @@ jobs:
       - run: npm run lint
       - run: npm test
 
+      # Concurrency defects are non-deterministic, so a suite that passed once
+      # has not been shown to pass. Re-runs the concurrency and idempotency
+      # suites 20× each (~15 s). Verified to catch a real flake before being
+      # trusted — see docs/AAR-M1b.md P1.
+      - run: npm run test:concurrency
+
   build:
     # Proves the app actually bundles, which the gates above do not.
     runs-on: windows-latest
