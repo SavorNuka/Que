@@ -112,6 +112,31 @@ describe('buildHlsArgs', () => {
     );
     expect(args).toEqual(expect.arrayContaining(['-hls_playlist_type', 'event']));
   });
+
+  /**
+   * OPEN-ACTIONS #12: found by writing an adversarial test that measured real
+   * segment durations instead of trusting `-hls_time`. It is only a minimum —
+   * the muxer cuts at the next keyframe after that many seconds — and x264's
+   * default keyframe interval (~10s at 24fps) is longer than the default
+   * hlsTime of 6, so real segments ran far longer than intended for any
+   * actual re-encode. `-force_key_frames` is the fix; a copy-only job needs
+   * no such thing, since it cannot control the source's own keyframes.
+   */
+  it('forces a keyframe every hlsTime seconds when actually re-encoding video', () => {
+    const transcode = buildHlsArgs(
+      { remuxContainer: false, transcodeVideo: true, transcodeAudio: false },
+      { inputPath: 'in.mp4', playlistPath: 'p', segmentPattern: 's', hlsTimeSeconds: 4 }
+    );
+    expect(transcode).toEqual(expect.arrayContaining(['-force_key_frames', 'expr:gte(t,n_forced*4)']));
+  });
+
+  it('never forces keyframes on a copy-only job — nothing controls the source\'s own', () => {
+    const copyOnly = buildHlsArgs(
+      { remuxContainer: true, transcodeVideo: false, transcodeAudio: true },
+      { inputPath: 'in.mkv', playlistPath: 'p', segmentPattern: 's' }
+    );
+    expect(copyOnly).not.toContain('-force_key_frames');
+  });
 });
 
 /**

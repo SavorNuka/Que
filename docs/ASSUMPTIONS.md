@@ -14,7 +14,7 @@ Test scripts are reproducible; method is stated per row.
 The two wrong ones both sit in the playback path and change the design. Nothing
 found invalidates the overall architecture.
 
-**Since implementation began: 3 overturned** (§H). One of them — H1 — has now been wrong
+**Since implementation began: 5 overturned** (§H). One of them — H1 — has now been wrong
 *twice*, in opposite directions, and is the clearest evidence in this project that a single
 machine is not a measurement.
 
@@ -344,6 +344,63 @@ key for a batch) the harness measured 1 call, 1 distinct result, and **1 of 12 r
 **What changed.** The key identifies the *request*, not the row: origin identity plus every
 parameter that varies the response. Rows wanting the same resource share a key by design;
 rows wanting different resources cannot collide.
+
+### H4. ⛔ WRONG — real 1080p HEVC transcodes at a small fraction of the 720p proxy's speed
+
+*PRA-M1c §3 M-3 measured 36× realtime for a video transcode, on a 720p H.264 source — the
+only content available at the time, and flagged in that document as "must not be
+generalised." Closes OPEN-ACTIONS #8.*
+
+It didn't generalise. Real content found in the library after M1c shipped: House of the
+Dragon S01E01 (HEVC, 1080p, MP4) and several Studio Ghibli films (HEVC, 1080p, MKV). A real
+3-minute clip, `libx264 veryfast crf20`, 28 cores:
+
+```
+1080p HEVC -> H.264, real content        1.10x - 1.40x realtime (3 runs, same clip)
+720p H.264 -> H.264, PRA-M1c §3 M-3 proxy 36x realtime
+```
+
+Roughly **30× slower** than the number the design had been reasoning from. The gap is
+resolution and source codec, not measurement noise — HEVC software decode is the known-heavy
+half of this pipeline, and 1080p carries four times the pixels of 720p. A real low-resolution
+source (Chicken Little, 556×304, mpeg4+AC-3 in AVI — needing all three fixes: container,
+video and audio) transcoded at **~17× realtime**, consistent with the original 720p figure
+once resolution is accounted for.
+
+**What changed.** Nothing in the design — a real 1080p HEVC transcode is still comfortably
+above 1× on this machine, so "start ffmpeg and let it catch up" still holds *on this
+hardware, for this content*. What changed is the confidence behind that sentence: at
+1.1–1.4×, generation is barely ahead of playback, not comfortably ahead of it the way the
+36× figure implied. There is very little headroom before a slower machine, a heavier preset,
+or (see H5) contention pushes this under 1× and playback stalls waiting on its own transcode.
+
+### H5. ⛔ WRONG — reserving more cores for a transcode made it slower under contention, not faster
+
+*Design assumption from PRA-M1c §5.4, tested for the first time by a real simultaneous scan
+and transcode rather than by the unit tests that exercise the wiring in isolation. Closes
+OPEN-ACTIONS #9.*
+
+`TRANSCODE_CORE_RESERVATION` was `min(4, cores)` — reserved from the shared budget *and*
+passed straight to ffmpeg's `-threads`. On this 28-core machine that reserved 4, which left
+the probe pool's own target (8) untouched — it never had reason to shrink, and a real
+concurrent scan slowed the transcode **3.83×** (130s alone -> 498s concurrent).
+
+The first fix tried was reserving nearly the whole machine (`total - 2` = 26) and passing
+that same number to `-threads`. Measured, not reasoned about: **12.8× slower** (129s alone
+-> 1647s concurrent), even though the probe pool now correctly shrank to 2. Giving the
+encoder more threads bought nothing when idle (129s alone either way — this content is
+decode-bound, x264 thread count does not touch the decoder) and cost a great deal under any
+contention: a pipeline configured for many threads stalls harder when a competing process
+preempts even a few of them than one configured for few threads to begin with.
+
+**What changed.** The reservation (how many cores to take away from the probe pool) and the
+encoder's own thread count are different levers and are now set independently:
+`TRANSCODE_CORE_RESERVATION` stays large (`total - 2`, shrinking the probe pool to near-idle
+during a transcode) and a new `TRANSCODE_ENCODER_THREADS` is a small fixed constant (4),
+unrelated to how much the budget reserves. Re-measured with both real changes in place:
+**1.26× slower** (163s alone -> 206s concurrent) — real overhead from a genuinely competing
+scan, not starvation. `src/main/transcode/budget.ts` carries the full measurement history in
+comments, because the wrong fix looked exactly as reasonable as the right one until it ran.
 
 ---
 

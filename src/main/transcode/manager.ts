@@ -2,7 +2,7 @@ import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { requireFfmpeg } from '../ffmpeg';
 import type { ConcurrencyBudget } from './budget';
-import { TRANSCODE_CORE_RESERVATION } from './budget';
+import { TRANSCODE_CORE_RESERVATION, TRANSCODE_ENCODER_THREADS } from './budget';
 import { ensureDir, jobDir } from './cache';
 import { buildHlsArgs, type TranscodePlan } from './plan';
 
@@ -57,7 +57,10 @@ export interface TranscodeManagerOptions {
   spawn?: SpawnFn;
   idleTimeoutMs?: number;
   now?: () => number;
+  /** How many cores to reserve from the shared budget — shrinks the probe pool. */
   coreReservation?: number;
+  /** How many threads to hand libx264 via `-threads` — deliberately separate; see budget.ts. */
+  encoderThreads?: number;
 }
 
 export class TranscodeManager {
@@ -68,6 +71,7 @@ export class TranscodeManager {
   #idleTimeoutMs: number;
   #now: () => number;
   #coreReservation: number;
+  #encoderThreads: number;
 
   constructor(options: TranscodeManagerOptions) {
     this.#cacheRoot = options.cacheRoot;
@@ -76,6 +80,7 @@ export class TranscodeManager {
     this.#idleTimeoutMs = options.idleTimeoutMs ?? 60_000;
     this.#now = options.now ?? Date.now;
     this.#coreReservation = options.coreReservation ?? TRANSCODE_CORE_RESERVATION;
+    this.#encoderThreads = options.encoderThreads ?? TRANSCODE_ENCODER_THREADS;
   }
 
   get jobCount(): number {
@@ -134,7 +139,9 @@ export class TranscodeManager {
       playlistPath,
       segmentPattern,
       startSeconds: req.startSeconds,
-      threads: wantsCores ? this.#coreReservation : undefined,
+      // Deliberately NOT #coreReservation — see budget.ts's
+      // TRANSCODE_ENCODER_THREADS for why the two are separate numbers.
+      threads: wantsCores ? this.#encoderThreads : undefined,
     });
 
     const proc = this.#spawn(requireFfmpeg(), args);

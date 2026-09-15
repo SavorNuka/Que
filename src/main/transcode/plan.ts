@@ -73,10 +73,27 @@ export function buildHlsArgs(plan: TranscodePlan, opts: HlsArgsOptions): string[
 
   args.push('-i', opts.inputPath, '-map', '0:v:0', '-map', '0:a:0');
 
+  const hlsTime = opts.hlsTimeSeconds ?? 6;
+
   args.push('-c:v', plan.transcodeVideo ? 'libx264' : 'copy');
   if (plan.transcodeVideo) {
     args.push('-preset', 'veryfast', '-crf', '20');
     if (opts.threads !== undefined) args.push('-threads', String(opts.threads));
+    /**
+     * `-hls_time` is only a minimum: the HLS muxer cuts at the next
+     * keyframe *after* that many seconds, and x264's default keyframe
+     * interval (~250 frames, ~10s at 24fps) is longer than the default
+     * `hlsTime` of 6 — found by writing an adversarial test that measured
+     * real segment durations rather than trusting the flag (OPEN-ACTIONS
+     * #12). Left unset, real segments run far longer than `hlsTime`, which
+     * both delays time-to-first-segment and breaks the seek bucketing in
+     * `cache.ts`/`Player.tsx`, which assumes segments are actually this
+     * length. `expr:gte(...)` forces one every `hlsTime` seconds of
+     * presentation time regardless of the source's frame rate. Only
+     * meaningful for an actual re-encode — a copy-only job inherits
+     * whatever keyframes the source already has.
+     */
+    args.push('-force_key_frames', `expr:gte(t,n_forced*${String(hlsTime)})`);
   }
 
   args.push('-c:a', plan.transcodeAudio ? 'aac' : 'copy');
@@ -84,7 +101,7 @@ export function buildHlsArgs(plan: TranscodePlan, opts: HlsArgsOptions): string[
 
   args.push(
     '-f', 'hls',
-    '-hls_time', String(opts.hlsTimeSeconds ?? 6),
+    '-hls_time', String(hlsTime),
     '-hls_playlist_type', 'event',
     '-hls_segment_filename', opts.segmentPattern,
     opts.playlistPath

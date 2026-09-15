@@ -118,6 +118,17 @@ Each cost real time. Full detail in `docs/ASSUMPTIONS.md` and the AARs.
 - **No `npm rebuild better-sqlite3`.** It ships prebuilt binaries. Running rebuild wastes a
   minute and prints an alarming gyp failure that means nothing.
 - Never put `node_modules` on a network-attached path. 16,343 files; >70 min there vs 9 s local.
+- **Node 24 LTS, and point PATH at nvm's real binary, never its shim.** This machine has a
+  standalone Node 25 (EOL 2026-06-01, excluded by `package.json`'s `engines`) in the
+  *system*-level PATH, which outranks nvm's user-level entries — so a fresh terminal resolves
+  `node` to 25 regardless of what nvm reports, until that is fixed with admin elevation.
+  Prepend `…\nvm\installs\v24.21.0` — **not** `…\nvm\.shim` or `…\nvm\.nodejs`, which are
+  736 KB proxies rather than real Node. Vitest forks its workers via `process.execPath`; through
+  the proxy the worker IPC never connects, and `tests/renderer/useAsync.test.tsx` silently does
+  not run at all — reported as an "unhandled error" rather than a failure, with the suite
+  quietly dropping from 428 tests to 425 and taking 36 minutes instead of 23 seconds. A test
+  file that vanishes without failing is the same class of bug as AAR-M1c D3; check the test
+  *count*, not just the absence of red.
 
 **Runtime**
 
