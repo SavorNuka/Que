@@ -248,11 +248,74 @@ footer {
   white-space: nowrap;
 }
 
-.player video {
+.player-media {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+
+/*
+ * Fullscreen: the control bar overlays the video instead of sitting in normal
+ * flex flow, so hiding it (opacity, see .player-controls.hidden below) lets
+ * the video's own flex:1 immediately reclaim that space — the "aspect ratio
+ * grows to recover the real estate" behaviour — rather than leaving a gap
+ * where an invisible-but-still-laid-out bar used to be. Windowed mode keeps
+ * the bar in normal flow below the video; only fullscreen overlays it.
+ */
+.player-media.fullscreen .player-controls {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+.player-media video {
   flex: 1;
   min-height: 0;
   width: 100%;
   background: #000;
+}
+
+/*
+ * Custom control bar (Player.tsx). Native <video controls> reads
+ * el.duration/el.currentTime off whichever HLS job is currently loaded, which
+ * for a seek-past-the-frontier is a fresh small job with its own local
+ * timeline — the native bar showed the wrong total and couldn't seek past
+ * what that one job had generated. These are bound to the real file duration
+ * instead, regardless of which job backs the current position.
+ */
+.player-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  transition: opacity 200ms ease;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+.player-controls .time {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.player-controls .scrub {
+  flex: 1;
+}
+
+.player-controls .volume {
+  width: 80px;
+}
+
+/* Fullscreen auto-hide (Player.tsx) — stays mounted so a drag on the scrub
+   bar isn't interrupted by an unmount; opacity + pointer-events instead. */
+.player-controls.hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .player-error {

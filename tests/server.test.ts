@@ -182,6 +182,38 @@ describe('MediaServer', () => {
     expect(res.status).toBe(405);
   });
 
+  /**
+   * The renderer's origin is never this server's, so every request from it
+   * is cross-origin — including the direct-play HEAD probe and hls.js's
+   * playlist/segment fetches (both M1c). Node's `fetch` here doesn't
+   * enforce CORS the way a real browser does, so this only asserts the
+   * headers a browser's CORS check reads, not the enforcement itself —
+   * that gap is exactly how a real run hit "Failed to fetch" on every
+   * playback attempt despite 428 passing tests.
+   */
+  describe('CORS', () => {
+    it('sets Access-Control-Allow-Origin on a normal response', async () => {
+      const res = await fetch(`${base}/health`);
+      expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    });
+
+    it('sets it on an error response too, not just success', async () => {
+      const res = await fetch(`${base}/stream/99999?t=${token}`);
+      expect(res.status).toBe(404);
+      expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    });
+
+    it('answers an OPTIONS preflight without requiring the token', async () => {
+      const id = addMedia();
+      const res = await fetch(`${base}/stream/${id}`, { method: 'OPTIONS' });
+
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe('*');
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET, HEAD, OPTIONS');
+      expect(res.headers.get('access-control-allow-headers')).toBe('x-que-token');
+    });
+  });
+
   it('404s an unknown id', async () => {
     const res = await fetch(`${base}/stream/99999?t=${token}`);
     expect(res.status).toBe(404);
@@ -422,7 +454,14 @@ describe('MediaServer — HLS (M1c)', () => {
       { enabled: false, maxAge: 18, allowUnrated: true, blockExplicit: false, pinSet: false, unlockMinutes: 30 },
       null
     );
-    const manager = new TranscodeManager({ cacheRoot, budget: new ConcurrencyBudget(4), spawn: instantSpawn });
+    const manager = new TranscodeManager({
+      cacheRoot,
+      budget: new ConcurrencyBudget(4),
+      spawn: instantSpawn,
+      // instantSpawn never executes this — stubbed so CI (no real ffmpeg on
+      // disk, by design) doesn't fail resolving a path nothing runs.
+      resolveFfmpeg: () => 'ffmpeg',
+    });
     server = new MediaServer(() => db, { manager, cacheRoot });
     const status = await server.start(0);
     base = `http://127.0.0.1:${status.port}`;

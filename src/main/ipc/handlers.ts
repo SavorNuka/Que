@@ -196,6 +196,10 @@ function makeHandlers({ getWindow, server }: HandlerDeps): Handlers {
       mediaRepo.markFinished(getDatabase(), id);
     },
 
+    async 'player:setFullscreen'(fullscreen) {
+      getWindow()?.setFullScreen(fullscreen);
+    },
+
     async 'server:status'() {
       return server.status();
     },
@@ -275,9 +279,13 @@ function requireUnlocked(): void {
   }
 }
 
-/** Push an event to the renderer. Silent when the window is gone. */
 let emitTo: (() => BrowserWindow | null) | null = null;
-function emit<E extends EventName>(event: E, payload: EventMap[E]): void {
+/**
+ * Push an event to the renderer. Silent when the window is gone. Exported so
+ * index.ts can push from a `BrowserWindow` event (e.g. `enter-full-screen`),
+ * not only from an IPC handler.
+ */
+export function emit<E extends EventName>(event: E, payload: EventMap[E]): void {
   const win = emitTo?.();
   if (win && !win.isDestroyed()) win.webContents.send(event, payload);
 }
@@ -328,6 +336,7 @@ export function createDispatch(deps: HandlerDeps): Dispatch {
  */
 export function registerIpcHandlers(deps: HandlerDeps): void {
   emitTo = deps.getWindow;
+
   const dispatch = createDispatch(deps);
 
   for (const channel of IPC_CHANNELS) {

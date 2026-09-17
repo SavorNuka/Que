@@ -42,6 +42,7 @@ vi.mock('../src/main/settings', () => ({
   getKey: () => null,
 }));
 
+import type { BrowserWindow } from 'electron';
 import type { Db } from '../src/main/db/connection';
 import { setDatabase } from '../src/main/db/connection';
 import { reindexMedia } from '../src/main/db/search';
@@ -260,6 +261,29 @@ describe('IPC round-trips', () => {
       const detail = await dispatch('library:get', id);
       expect(detail.resumeMs).toBeNull();
       expect(detail.playCount).toBe(1);
+    });
+
+    /**
+     * Drives `BrowserWindow.setFullScreen()` directly, not the HTML5
+     * Fullscreen API — a generic `Element.requestFullscreen()` call from the
+     * renderer never once resolved or rejected in manual testing.
+     */
+    it('sets fullscreen on the real window, not the HTML5 Fullscreen API', async () => {
+      const setFullScreen = vi.fn();
+      const withWindow = createDispatch({
+        getWindow: () => ({ setFullScreen }) as unknown as BrowserWindow,
+        server,
+      });
+
+      await withWindow('player:setFullscreen', true);
+      expect(setFullScreen).toHaveBeenCalledWith(true);
+
+      await withWindow('player:setFullscreen', false);
+      expect(setFullScreen).toHaveBeenCalledWith(false);
+    });
+
+    it('does nothing, not throw, when there is no window to set fullscreen on', async () => {
+      await expect(dispatch('player:setFullscreen', true)).resolves.toBeUndefined();
     });
   });
 

@@ -54,6 +54,14 @@ export interface IpcMap {
   'media:streamUrl': { args: [id: number]; result: string };
   'player:progress': { args: [id: number, positionMs: number]; result: void };
   'player:finished': { args: [id: number]; result: void };
+  /**
+   * Drives the real OS window, not the HTML5 Fullscreen API — `<video>`'s own
+   * built-in fullscreen (a separate Blink code path) briefly appeared to
+   * partly work, but a generic `Element.requestFullscreen()` call from this
+   * app's renderer never once resolved or rejected in manual testing; only
+   * `BrowserWindow.setFullScreen()` was found to reliably work.
+   */
+  'player:setFullscreen': { args: [fullscreen: boolean]; result: void };
   'server:status': { args: []; result: ServerStatus };
 
   'restrictions:get': { args: []; result: RestrictionState };
@@ -100,6 +108,7 @@ export const IPC_CHANNELS = [
   'media:streamUrl',
   'player:progress',
   'player:finished',
+  'player:setFullscreen',
   'server:status',
   'restrictions:get',
   'restrictions:set',
@@ -134,6 +143,8 @@ export interface EventMap {
   };
   'library:changed': { reason: 'import' | 'scan' | 'edit' | 'remove' };
   'provider:rateLimited': { provider: string; retryAfterMs: number };
+  /** Pushed on any transition, not just ones `player:setFullscreen` caused — covers OS/keyboard-triggered fullscreen too. */
+  'player:fullscreenChanged': { fullscreen: boolean };
 }
 
 export type EventName = keyof EventMap;
@@ -142,6 +153,7 @@ export const EVENT_NAMES = [
   'scan:progress',
   'library:changed',
   'provider:rateLimited',
+  'player:fullscreenChanged',
 ] as const satisfies readonly EventName[];
 
 export type QueApi = {

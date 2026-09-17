@@ -360,8 +360,35 @@ export class MediaServer {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.port}`);
 
+    /**
+     * CORS.
+     *
+     * The renderer's own origin is `file://` (or the dev server's), never
+     * this one, so every `fetch()` against it — the direct-play HEAD probe
+     * and hls.js's playlist/segment requests, both added in M1c — is
+     * cross-origin. Node's `fetch` in tests doesn't enforce CORS, so 428
+     * passing tests shipped this silently; only a real browser does, which
+     * is exactly the blind spot HANDOFF.md exists to close. `*` is safe
+     * here because origin was never part of the security boundary — the
+     * token is (`authorised()` below) — and no request carries credentials.
+     */
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    if (req.method === 'OPTIONS') {
+      // hls.js's `xhrSetup` sets `x-que-token` on every request, a
+      // non-simple header, which forces a preflight the browser sends with
+      // no query string or auth of its own to check.
+      res.writeHead(204, {
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'x-que-token',
+        'Access-Control-Max-Age': '86400',
+      });
+      res.end();
+      return;
+    }
+
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405, { Allow: 'GET, HEAD' });
+      res.writeHead(405, { Allow: 'GET, HEAD, OPTIONS' });
       res.end();
       return;
     }

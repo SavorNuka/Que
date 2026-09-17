@@ -152,6 +152,7 @@ export const argSchemas = {
   // Positions are clamped: a bad value should not poison resume.
   'player:progress': z.tuple([id, z.number().int().min(0).max(86_400_000)]),
   'player:finished': z.tuple([id]),
+  'player:setFullscreen': z.tuple([z.boolean()]),
   'server:status': z.tuple([]),
 
   'restrictions:get': z.tuple([]),

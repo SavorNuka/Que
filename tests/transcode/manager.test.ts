@@ -45,6 +45,10 @@ describe('TranscodeManager — lifecycle', () => {
       cacheRoot: dir,
       budget,
       spawn,
+      // Never actually executed by the fake `spawn` above, but requireFfmpeg()
+      // throws if the real ~80 MB binary isn't on disk — which it deliberately
+      // isn't in CI (`npm ci --ignore-scripts`). Stub it out.
+      resolveFfmpeg: () => 'ffmpeg',
       now: () => now,
       idleTimeoutMs: 1000,
       ...overrides,

@@ -61,6 +61,15 @@ export interface TranscodeManagerOptions {
   coreReservation?: number;
   /** How many threads to hand libx264 via `-threads` — deliberately separate; see budget.ts. */
   encoderThreads?: number;
+  /**
+   * Resolves the ffmpeg binary path. Injectable, like `spawn`, so a test that
+   * fakes `spawn` (and so never actually executes the binary) doesn't also
+   * need the real ~80 MB ffmpeg on disk just to obtain a path string for it —
+   * `requireFfmpeg()` throws when it's absent, which it deliberately is in CI
+   * (`npm ci --ignore-scripts` skips the fetch to keep the gate fast). Without
+   * this, every test here failed in CI despite never touching a real process.
+   */
+  resolveFfmpeg?: () => string;
 }
 
 export class TranscodeManager {
@@ -72,6 +81,7 @@ export class TranscodeManager {
   #now: () => number;
   #coreReservation: number;
   #encoderThreads: number;
+  #resolveFfmpeg: () => string;
 
   constructor(options: TranscodeManagerOptions) {
     this.#cacheRoot = options.cacheRoot;
@@ -81,6 +91,7 @@ export class TranscodeManager {
     this.#now = options.now ?? Date.now;
     this.#coreReservation = options.coreReservation ?? TRANSCODE_CORE_RESERVATION;
     this.#encoderThreads = options.encoderThreads ?? TRANSCODE_ENCODER_THREADS;
+    this.#resolveFfmpeg = options.resolveFfmpeg ?? requireFfmpeg;
   }
 
   get jobCount(): number {
@@ -144,7 +155,7 @@ export class TranscodeManager {
       threads: wantsCores ? this.#encoderThreads : undefined,
     });
 
-    const proc = this.#spawn(requireFfmpeg(), args);
+    const proc = this.#spawn(this.#resolveFfmpeg(), args);
 
     const job: TranscodeJob = {
       key,

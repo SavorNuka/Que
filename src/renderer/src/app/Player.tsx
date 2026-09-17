@@ -34,12 +34,25 @@ function formatTime(seconds: number): string {
     : `${m}:${String(sec).padStart(2, '0')}`;
 }
 
-/** `/hls/<id>/playlist.m3u8?t=X` -> `/hls/<id>/seek/<bucket>/playlist.m3u8?t=X`. */
-function seekPlaylistUrl(baseHlsUrl: string, startSeconds: number): string {
+/**
+ * `http://127.0.0.1:P/hls/<id>/playlist.m3u8?t=X` ->
+ * `http://127.0.0.1:P/hls/<id>/seek/<bucket>/playlist.m3u8?t=X`.
+ *
+ * Must stay absolute. `baseHlsUrl` already is (server.ts `hlsUrlFor` — the
+ * renderer's own origin is `file://` or the dev server's, never the media
+ * server's), but returning only `pathname + search` here silently discards
+ * that origin, and `hls.loadSource()` then resolves the relative result
+ * against the *page's* origin instead — the same class of bug AAR-M1c
+ * already found and fixed for the base URL, reintroduced in the seek path
+ * and invisible until an actual seek is tried against a real dev server,
+ * where it surfaces as hls.js's ManifestParsingError on the page's own
+ * index.html rather than a clean network error.
+ */
+export function seekPlaylistUrl(baseHlsUrl: string, startSeconds: number): string {
   const bucket = Math.max(0, Math.floor(startSeconds / SEEK_BUCKET_SECONDS) * SEEK_BUCKET_SECONDS);
   const url = new URL(baseHlsUrl, window.location.href);
   url.pathname = url.pathname.replace(/\/playlist\.m3u8$/, `/seek/${String(bucket)}/playlist.m3u8`);
-  return url.pathname + url.search;
+  return url.toString();
 }
 
 /** Whether `time` (seconds, media-relative) falls inside any buffered range. */
@@ -61,7 +74,82 @@ export function Player({ item, onClose }: Props): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
   const resumedRef = useRef(false);
+
+  // The catalogue behind this modal can be taller than the viewport; a fixed
+  // overlay doesn't stop the document itself from scrolling, and a native
+  // scrollbar renders in the browser's own chrome layer, above this overlay's
+  // z-index regardless. Suppress it for as long as the player is open.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+
+  /**
+   * Auto-hide the control bar in fullscreen only — windowed mode keeps it
+   * always visible. Two independent triggers, per spec: the mouse resting
+   * near where the bar sits keeps it shown for as long as it stays there
+   * (hides the instant the pointer moves away); a key press shows it and
+   * starts a fresh 5-second countdown, overridden by the mouse rule while
+   * the pointer is in the band.
+   */
+  useEffect(() => {
+    if (!isFullscreen) {
+      setControlsVisible(true);
+      return;
+    }
+
+    const HIDE_AFTER_MS = 5000;
+    const NEAR_BOTTOM_PX = 100;
+    let hideTimer: ReturnType<typeof setTimeout> | null = null;
+    let mouseNearBottom = false;
+
+    const clearHideTimer = (): void => {
+      if (hideTimer !== null) {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+    };
+    const scheduleHide = (): void => {
+      clearHideTimer();
+      hideTimer = setTimeout(() => {
+        if (!mouseNearBottom) setControlsVisible(false);
+      }, HIDE_AFTER_MS);
+    };
+
+    setControlsVisible(true);
+    scheduleHide();
+
+    const onMouseMove = (e: MouseEvent): void => {
+      mouseNearBottom = e.clientY >= window.innerHeight - NEAR_BOTTOM_PX;
+      if (mouseNearBottom) {
+        setControlsVisible(true);
+        clearHideTimer();
+      } else {
+        setControlsVisible(false);
+      }
+    };
+    const onKeyDown = (): void => {
+      setControlsVisible(true);
+      scheduleHide();
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('keydown', onKeyDown);
+      clearHideTimer();
+    };
+  }, [isFullscreen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -190,18 +278,74 @@ export function Player({ item, onClose }: Props): React.JSX.Element {
   }, [hlsPlaylistUrl, hlsOffsetSeconds, item.resumeMs, item.durationMs]);
 
   /**
-   * A seek past what hls.js already has buffered for the current job: switch
-   * to a fresh job at that offset instead of stalling on content that may
-   * not exist yet. A seek within the buffered range is left to hls.js.
+   * The scrub bar always spans the real file duration (`item.durationMs`,
+   * known from the probe at scan time, independent of how much a progressive
+   * HLS job has generated so far) — unlike the *native* `<video>` control,
+   * which reads `el.duration`/`el.currentTime` off whatever job is currently
+   * loaded and so can only represent that job's own small, local timeline.
+   * That mismatch is what made the native scrub bar show the wrong total and
+   * cap seeking to a few minutes around the last seek point.
+   *
+   * A target already inside the current job's buffered range is a plain
+   * `currentTime` set (hls.js serves it from what's already downloaded); one
+   * outside it starts a fresh job at that offset, same mechanism as before.
    */
-  const onSeeking = (): void => {
+  const seekTo = (targetSeconds: number): void => {
     const el = ref.current;
-    if (!el || !hlsBaseUrl || hlsRef.current === null) return;
-    if (isBuffered(el, el.currentTime)) return;
+    if (!el) return;
 
-    const targetAbsolute = hlsOffsetSeconds + el.currentTime;
-    setHlsOffsetSeconds(Math.floor(targetAbsolute / SEEK_BUCKET_SECONDS) * SEEK_BUCKET_SECONDS);
-    setHlsPlaylistUrl(seekPlaylistUrl(hlsBaseUrl, targetAbsolute));
+    if (!hlsPlaylistUrl) {
+      el.currentTime = targetSeconds;
+      return;
+    }
+    if (!hlsBaseUrl) return;
+
+    const relative = targetSeconds - hlsOffsetSeconds;
+    if (relative >= 0 && isBuffered(el, relative)) {
+      el.currentTime = relative;
+      return;
+    }
+
+    setHlsOffsetSeconds(Math.max(0, Math.floor(targetSeconds / SEEK_BUCKET_SECONDS) * SEEK_BUCKET_SECONDS));
+    setHlsPlaylistUrl(seekPlaylistUrl(hlsBaseUrl, targetSeconds));
+  };
+
+  /**
+   * Fullscreen goes through the main process (`player:setFullscreen` ->
+   * `BrowserWindow.setFullScreen()`), not the HTML5 Fullscreen API. A generic
+   * `Element.requestFullscreen()` call from this renderer never once
+   * resolved or rejected in manual testing — no error, no `fullscreenchange`
+   * event, no visible effect, just a permanently pending promise. The native
+   * window method worked immediately. Subscribing to the pushed event
+   * (rather than only setting state optimistically) keeps this correct if a
+   * keyboard shortcut or the OS's own window chrome changes it instead.
+   */
+  useEffect(() => window.que.on('player:fullscreenChanged', ({ fullscreen }) => setIsFullscreen(fullscreen)), []);
+
+  const toggleFullscreen = (): void => {
+    void window.que['player:setFullscreen'](!isFullscreen);
+  };
+
+  const togglePlay = (): void => {
+    const el = ref.current;
+    if (!el) return;
+    if (el.paused) void el.play().catch(() => undefined);
+    else el.pause();
+  };
+
+  const toggleMuted = (): void => {
+    const el = ref.current;
+    const next = !muted;
+    setMuted(next);
+    if (el) el.muted = next;
+  };
+
+  const onVolumeChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const next = Number(e.target.value);
+    setVolume(next);
+    const el = ref.current;
+    if (el) el.volume = next;
+    if (next > 0 && muted) toggleMuted();
   };
 
   // Write progress back periodically and on unmount, so resume survives both
@@ -236,37 +380,77 @@ export function Player({ item, onClose }: Props): React.JSX.Element {
   };
 
   const playing = url ?? hlsPlaylistUrl;
+  const absolutePosition = hlsPlaylistUrl ? hlsOffsetSeconds + position : position;
 
   return (
     <div className="player" role="dialog" aria-label={`Playing ${item.title}`}>
-      <div className="player-bar">
-        <strong>{item.title}</strong>
-        <span className="dim">
-          {formatTime(hlsPlaylistUrl ? hlsOffsetSeconds + position : position)} / {formatTime(duration)}
-        </span>
-        <button onClick={onClose}>Close</button>
-      </div>
+      {/* Hidden in fullscreen: real OS-window fullscreen (player:setFullscreen)
+          isn't the HTML5 Fullscreen API, so nothing hides this automatically
+          the way a fullscreened element's non-fullscreen siblings would be. */}
+      {!isFullscreen && (
+        <div className="player-bar">
+          <strong>{item.title}</strong>
+          <button onClick={onClose}>Close</button>
+        </div>
+      )}
 
       {error ? (
         <p className="player-error">{error}</p>
       ) : (
-        <video
-          ref={ref}
-          src={url ?? undefined}
-          controls
-          autoPlay
-          hidden={!playing}
-          onLoadedMetadata={onLoadedMetadata}
-          onTimeUpdate={() => setPosition(ref.current?.currentTime ?? 0)}
-          onSeeking={onSeeking}
-          onEnded={() => {
-            void window.que['player:finished'](item.id);
-            onClose();
-          }}
-          onError={() =>
-            setError('The browser could not decode this file, even after remuxing/transcoding.')
-          }
-        />
+        <div className={`player-media${isFullscreen ? ' fullscreen' : ''}`}>
+          <video
+            ref={ref}
+            src={url ?? undefined}
+            autoPlay
+            hidden={!playing}
+            onLoadedMetadata={onLoadedMetadata}
+            onTimeUpdate={() => setPosition(ref.current?.currentTime ?? 0)}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onEnded={() => {
+              void window.que['player:finished'](item.id);
+              onClose();
+            }}
+            onError={() =>
+              setError('The browser could not decode this file, even after remuxing/transcoding.')
+            }
+          />
+          {playing && (
+            <div className={`player-controls${controlsVisible ? '' : ' hidden'}`}>
+              <button type="button" onClick={togglePlay}>
+                {isPlaying ? 'Pause' : 'Play'}
+              </button>
+              <span className="time">{formatTime(absolutePosition)}</span>
+              <input
+                type="range"
+                className="scrub"
+                aria-label="Seek"
+                min={0}
+                max={Math.max(duration, 1)}
+                step={1}
+                value={Math.min(absolutePosition, Math.max(duration, 1))}
+                onChange={(e) => seekTo(Number(e.target.value))}
+              />
+              <span className="time">{formatTime(duration)}</span>
+              <button type="button" onClick={toggleMuted}>
+                {muted ? 'Unmute' : 'Mute'}
+              </button>
+              <input
+                type="range"
+                className="volume"
+                aria-label="Volume"
+                min={0}
+                max={1}
+                step={0.05}
+                value={muted ? 0 : volume}
+                onChange={onVolumeChange}
+              />
+              <button type="button" onClick={toggleFullscreen}>
+                {isFullscreen ? 'Exit full screen' : 'Full screen'}
+              </button>
+            </div>
+          )}
+        </div>
       )}
       {!error && !playing ? <p className="dim">Opening…</p> : null}
     </div>

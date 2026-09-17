@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { app, BrowserWindow, session, shell } from 'electron';
 import { openDatabase, setDatabase, closeDatabase, getDatabase } from './db/connection';
 import { setFfmpegSearchRoots } from './ffmpeg';
-import { registerIpcHandlers, setDbPathForInfo } from './ipc/handlers';
+import { emit, registerIpcHandlers, setDbPathForInfo } from './ipc/handlers';
 import { registerQueProtocol, registerQueScheme } from './protocol/que';
 import { MediaServer } from './server/server';
 import { load as loadSettings } from './settings';
@@ -109,6 +109,25 @@ function createWindow(): void {
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error('[renderer] process gone:', details.reason, details.exitCode);
   });
+
+  /**
+   * Fullscreen is driven by `player:setFullscreen` (ipc/handlers.ts) calling
+   * `BrowserWindow.setFullScreen()` directly, not the HTML5 Fullscreen API —
+   * a generic `Element.requestFullscreen()` call from the renderer never
+   * once resolved or rejected in manual testing on this Electron version;
+   * only the native window method reliably worked.
+   *
+   * These are `BrowserWindow` events, not `webContents` ones, and must be
+   * attached here — inside `createWindow()`, once `mainWindow` is actually
+   * assigned. `registerIpcHandlers` runs *before* this function (see
+   * `whenReady` below), so attaching them there captured `getWindow()` at a
+   * moment it was still null: the listener silently never attached (the same
+   * optional-chaining short-circuit class of bug as the renderer's earlier
+   * `mediaWrapRef?.requestFullscreen()`), and the renderer's fullscreen
+   * button never learned the OS window had actually gone fullscreen.
+   */
+  mainWindow.on('enter-full-screen', () => emit('player:fullscreenChanged', { fullscreen: true }));
+  mainWindow.on('leave-full-screen', () => emit('player:fullscreenChanged', { fullscreen: false }));
 
   // Object-form listener: the positional (level, message, line, sourceId)
   // signature is deprecated and warns at runtime.
